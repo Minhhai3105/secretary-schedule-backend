@@ -10,6 +10,8 @@ from app.api.logout import router as logout_router
 from app.api.me import router as me_router
 from app.api.refresh import router as refresh_router
 from app.api.schedules import router as schedules_router
+from app.api.reminder_settings import router as reminder_settings_router
+from app.api.email_deliveries import router as email_deliveries_router
 from app.api.password_reset import router as password_reset_router
 
 app = FastAPI(title="Secretary Schedule API")
@@ -32,6 +34,8 @@ app.include_router(logout_router)
 app.include_router(me_router)
 app.include_router(refresh_router)
 app.include_router(schedules_router)
+app.include_router(reminder_settings_router)
+app.include_router(email_deliveries_router)
 app.include_router(password_reset_router)
 
 @app.get("/health")
