@@ -22,6 +22,15 @@ Run the PostgreSQL-backed flow tests with `DATABASE_URL` set (and `PGPASSFILE` i
 ./.venv/bin/python -m unittest discover -s tests -v
 ./.venv/bin/python -m unittest tests.test_schedules -v
 ./.venv/bin/python -m unittest tests.test_chat_proposals -v
+./.venv/bin/python -m unittest tests.test_reminders -v
+./.venv/bin/python -m unittest tests.test_password_reset -v
+```
+
+Run the email reminder worker once or continuously:
+
+```sh
+./.venv/bin/python -m app.worker --once
+./.venv/bin/python -m app.worker --interval 30
 ```
 
 You can also run one case by its full name, for example `./.venv/bin/python -m unittest tests.test_schedules.ScheduleTests.test_stale_version_cannot_update_schedule -v`.
