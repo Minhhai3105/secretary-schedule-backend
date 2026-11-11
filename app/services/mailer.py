@@ -30,8 +30,11 @@ def send_email_message(*, to_email: str, subject: str, body: str) -> None:
 
     host = environ["SMTP_HOST"].strip()
     port = int(environ.get("SMTP_PORT", "465"))
+    timeout = int(environ.get("SMTP_TIMEOUT_SECONDS", "30"))
     username = environ.get("SMTP_USERNAME", "").strip()
     password = environ.get("SMTP_PASSWORD", "")
+    if host.lower() == "smtp.gmail.com":
+        password = password.replace(" ", "")
     sender = (environ.get("SMTP_FROM") or username).strip()
 
     message = EmailMessage()
@@ -51,13 +54,13 @@ def send_email_message(*, to_email: str, subject: str, body: str) -> None:
             host,
             port,
             context=ssl.create_default_context(),
-            timeout=10,
+            timeout=timeout,
         ) as smtp:
             if username:
                 smtp.login(username, password)
             smtp.send_message(message)
     else:
-        with smtplib.SMTP(host, port, timeout=10) as smtp:
+        with smtplib.SMTP(host, port, timeout=timeout) as smtp:
             if use_starttls:
                 smtp.starttls(context=ssl.create_default_context())
             if username:

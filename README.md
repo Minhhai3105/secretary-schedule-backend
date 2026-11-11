@@ -40,7 +40,7 @@ The five pre-merge development migrations were consolidated into `001_initial_sc
 ## External services
 
 - Chat: set `AI_API_KEY`; optional `AI_BASE_URL` (default `http://127.0.0.1:8317/v1`), `AI_MODEL` (default `gemini-3.8-flash-high`), and `AI_TIMEOUT_SECONDS` (default 60). The base URL must be reachable from the running backend. The local CLIProxyAPI address will not work on a remote server unless that service is deployed there too.
-- Password reset: set `SMTP_HOST`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `APP_FRONTEND_URL`; optional `SMTP_PORT` (default 465) and `SMTP_FROM`. The reset endpoint returns 503 until these are set. Real SMTP delivery has not been tested.
+- Password reset & reminders: set `SMTP_HOST`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `APP_FRONTEND_URL`; optional `SMTP_PORT` (default 465), `SMTP_FROM`, and `SMTP_TIMEOUT_SECONDS` (default 30). The reset endpoint returns 503 until these are set.
 - Frontend: set `CORS_ORIGINS` to a comma-separated list of exact frontend origins. Local Vite defaults are `http://localhost:5173,http://127.0.0.1:5173`.
 
 See [backend_status.md](docs/backend_status.md) for the implemented API and known limits.
