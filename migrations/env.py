@@ -29,6 +29,7 @@ from app.models.password_reset import PasswordReset
 from app.models.email_delivery import EmailDelivery
 from app.models.email_attempt import EmailAttempt
 from app.models.chat_proposal import ChatProposal
+from app.models.chat_message import ChatMessage
 
 target_metadata = Base.metadata
 

@@ -1,13 +1,13 @@
 from datetime import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
 from app.db.session import get_db
 from app.models.reminder_setting import ReminderSetting
 from app.models.user import User
-from app.schemas.reminder_setting import ReminderSettingsData
+from app.schemas.reminder_setting import ReminderSettingsData, ReminderSettingsPatch
 
 router = APIRouter(prefix="/api/reminder-settings", tags=["Reminder settings"])
 
@@ -52,6 +52,32 @@ def put_reminder_settings(
     settings.daily_time_vietnam = payload.daily_time
     settings.near_enabled = payload.near_enabled
     settings.lead_minutes = payload.lead_minutes
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    db.refresh(settings)
+    return settings_response(settings)
+
+
+@router.patch("", response_model=ReminderSettingsData)
+def patch_reminder_settings(
+    payload: ReminderSettingsPatch,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ReminderSettingsData:
+    changes = payload.model_dump(exclude_unset=True)
+    if not changes or any(value is None for value in changes.values()):
+        raise HTTPException(status_code=422, detail="At least one non-null setting is required")
+    settings = db.get(ReminderSetting, user.id)
+    if settings is None:
+        settings = ReminderSetting(user_id=user.id)
+        db.add(settings)
+        db.flush()
+    fields = {"daily_time": "daily_time_vietnam"}
+    for key, value in changes.items():
+        setattr(settings, fields.get(key, key), value)
     try:
         db.commit()
     except Exception:

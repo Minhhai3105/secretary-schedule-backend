@@ -3,19 +3,22 @@ from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.schedules import owned_schedule
 from app.core.auth import get_current_user
 from app.db.session import get_db
+from app.models.chat_message import ChatMessage
 from app.models.chat_proposal import ChatProposal
 from app.models.schedule import Schedule
 from app.models.user import User
 from app.schemas.chat import (
     ChatConfirmResponse,
+    ChatHistoryItem,
+    ChatHistoryPage,
     ChatMessageRequest,
     ChatMessageResponse,
     ChatProposalResponse,
@@ -49,6 +52,89 @@ def _proposal_response(proposal: ChatProposal) -> ChatProposalResponse:
     )
 
 
+def _save_exchange(
+    db: Session, user_id: UUID, message: str, response: ChatMessageResponse,
+    started_at: datetime,
+) -> None:
+    answered_at = max(datetime.now(timezone.utc), started_at + timedelta(microseconds=1))
+    db.add_all([
+        ChatMessage(
+            user_id=user_id, role="user", content=message, created_at_utc=started_at,
+        ),
+        ChatMessage(
+            user_id=user_id, role="assistant", content=response.answer,
+            response_data=response.model_dump(mode="json"), created_at_utc=answered_at,
+        ),
+    ])
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.get("/messages", response_model=ChatHistoryPage)
+def list_chat_messages(
+    limit: int = Query(default=20, ge=1, le=50),
+    cursor: UUID | None = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ChatHistoryPage:
+    query = select(ChatMessage).where(ChatMessage.user_id == user.id)
+    if cursor is not None:
+        anchor = db.scalar(query.where(ChatMessage.id == cursor))
+        if anchor is None:
+            raise HTTPException(status_code=400, detail="Invalid chat cursor")
+        query = query.where(or_(
+            ChatMessage.created_at_utc < anchor.created_at_utc,
+            and_(
+                ChatMessage.created_at_utc == anchor.created_at_utc,
+                ChatMessage.id < anchor.id,
+            ),
+        ))
+    rows = db.scalars(
+        query.order_by(ChatMessage.created_at_utc.desc(), ChatMessage.id.desc())
+        .limit(limit + 1)
+    ).all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    proposal_ids = [
+        UUID(row.response_data["proposal"]["id"])
+        for row in rows
+        if row.response_data and row.response_data.get("proposal")
+    ]
+    proposals = {
+        item.id: item for item in db.scalars(
+            select(ChatProposal).where(
+                ChatProposal.user_id == user.id, ChatProposal.id.in_(proposal_ids)
+            )
+        ).all()
+    } if proposal_ids else {}
+    now = datetime.now(timezone.utc)
+    items = []
+    for row in rows:
+        saved = ChatMessageResponse.model_validate(row.response_data) if row.response_data else None
+        proposal = proposals.get(saved.proposal.id) if saved and saved.proposal else None
+        proposal_state = None
+        if saved and saved.proposal:
+            proposal_state = (
+                "stale" if proposal is None or (
+                    proposal.status == "pending" and proposal.expires_at_utc <= now
+                ) else proposal.status
+            )
+        items.append(ChatHistoryItem(
+            id=row.id, role=row.role, content=row.content,
+            created_at_utc=row.created_at_utc,
+            schedules=saved.schedules if saved else [],
+            proposal=saved.proposal if saved else None,
+            proposal_state=proposal_state,
+        ))
+    return ChatHistoryPage(
+        messages=items,
+        next_cursor=rows[-1].id if has_more else None,
+    )
+
+
 @router.post("/messages", response_model=ChatMessageResponse)
 def chat_message(
     payload: ChatMessageRequest,
@@ -77,9 +163,15 @@ def chat_message(
         }
         for item in schedules
     ]
+    recent = db.scalars(
+        select(ChatMessage)
+        .where(ChatMessage.user_id == user.id)
+        .order_by(ChatMessage.created_at_utc.desc(), ChatMessage.id.desc())
+        .limit(5)
+    ).all()
     raw = ask_schedule_ai(
         payload.message,
-        [turn.model_dump() for turn in payload.history],
+        [{"role": turn.role, "content": turn.content} for turn in reversed(recent)],
         context,
         now.astimezone(VIETNAM_TZ).isoformat(),
     )
@@ -90,10 +182,12 @@ def chat_message(
 
     if result.intent == "answer":
         selected = [by_id[item] for item in result.schedule_ids if item in by_id]
-        return ChatMessageResponse(
+        response = ChatMessageResponse(
             answer=result.answer,
             schedules=[ScheduleResponse.model_validate(item) for item in selected],
         )
+        _save_exchange(db, user.id, payload.message, response, now)
+        return response
 
     target = None
     if result.intent in ("update", "cancel"):
@@ -140,17 +234,18 @@ def chat_message(
         proposed_data=proposed_data,
         expires_at_utc=now + PROPOSAL_TTL,
     )
-    db.add(proposal)
     try:
-        db.commit()
+        db.add(proposal)
+        db.flush()
+        response = ChatMessageResponse(
+            answer=result.answer,
+            proposal=_proposal_response(proposal),
+        )
+        _save_exchange(db, user.id, payload.message, response, now)
     except Exception:
         db.rollback()
         raise
-    db.refresh(proposal)
-    return ChatMessageResponse(
-        answer=result.answer,
-        proposal=_proposal_response(proposal),
-    )
+    return response
 
 
 @router.post(
