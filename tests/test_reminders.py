@@ -40,8 +40,15 @@ class ReminderWorkerTests(DatabaseCase):
         self.db.add(self.settings)
         self.db.flush()
 
+    @staticmethod
+    def _relative_morning_utc() -> datetime:
+        target_date = datetime.now(VIETNAM_TZ).date() + timedelta(days=1)
+        return datetime.combine(
+            target_date, time(8, 0), tzinfo=VIETNAM_TZ
+        ).astimezone(timezone.utc)
+
     def test_daily_and_near_reminders_enqueued_and_sent_once(self) -> None:
-        now = datetime(2026, 11, 12, 1, 0, tzinfo=timezone.utc)  # 08:00 GMT+7
+        now = self._relative_morning_utc()
         schedule = create_schedule(
             ScheduleCreate(
                 title="Morning briefing",
@@ -89,7 +96,7 @@ class ReminderWorkerTests(DatabaseCase):
         self.assertEqual(near_item.schedule_id, schedule.id)
 
     def test_failed_delivery_retries_up_to_four_attempts_and_records_reason(self) -> None:
-        now = datetime(2026, 11, 12, 1, 0, tzinfo=timezone.utc)
+        now = self._relative_morning_utc()
         self.settings.near_enabled = False
         self.db.flush()
 

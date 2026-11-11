@@ -21,10 +21,11 @@ Chat sends up to five prior turns and at most 200 of the user's schedules to the
 - PostgreSQL migrations applied; nine tables and constraints exist; Alembic model/schema comparison is clean.
 - Auth register, login, refresh rotation and replay rejection, logout, `me`, password hashing, and permission checks were exercised in local development.
 - Schedule, chat proposal, reminder worker, and password reset checks are split into PostgreSQL-backed test modules (`test_schedules`, `test_chat_proposals`, `test_reminders`, `test_password_reset`); test data is rolled back after each test.
-- Email reminder worker (`app/services/reminders.py`, `app/worker.py`) enqueues `daily`, `near`, and `update` deliveries with idempotent `event_key`s, cancels obsolete `near`/`update` deliveries (`pending` or `failed`) when schedules advance to a newer version or are cancelled, re-verifies the schedule version immediately before sending, and executes up to 4 `EmailAttempt`s per delivery.
+- Email reminder worker (`app/services/reminders.py`, `app/worker.py`) enqueues `daily`, `near`, and `update` deliveries with idempotent `event_key`s, cancels obsolete `near`/`update` deliveries (`pending` or `failed`) when schedules advance to a newer version or are cancelled, refreshes schedule state from PostgreSQL (`populate_existing=True`) immediately before sending, and executes up to 4 `EmailAttempt`s per delivery.
 
 ## Not yet verified or implemented
 
 - Real external SMTP delivery has not been verified with a live mail provider; unit tests use mocked SMTP (`SMTP_SSL` port 465 and `SMTP` STARTTLS port 587), and the password-reset background task is not durable across a process crash.
+- The reminder worker is designed to run as a single process (`python -m app.worker`); multi-worker concurrent locking (`FOR UPDATE SKIP LOCKED`) is not yet implemented.
 - The local CLIProxyAPI and its key are not packaged for deployment; production AI access needs a reachable, authorized provider and secret configuration.
 - No load test has demonstrated the requested ten concurrent users. Rate limiting, deployment configuration, and frontend integration remain to be done.

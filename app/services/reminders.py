@@ -48,7 +48,7 @@ def cancel_stale_schedule_deliveries(db: Session) -> int:
     cancelled_count = 0
     for delivery in active_deliveries:
         schedule = (
-            db.get(Schedule, delivery.schedule_id)
+            db.get(Schedule, delivery.schedule_id, populate_existing=True)
             if delivery.schedule_id is not None
             else None
         )
@@ -224,7 +224,7 @@ def _compose_delivery_email(
         return subject, body
 
     schedule = (
-        db.get(Schedule, delivery.schedule_id)
+        db.get(Schedule, delivery.schedule_id, populate_existing=True)
         if delivery.schedule_id is not None
         else None
     )
@@ -298,7 +298,7 @@ def process_due_deliveries(
 
         if delivery.kind in ("near", "update"):
             schedule = (
-                db.get(Schedule, delivery.schedule_id)
+                db.get(Schedule, delivery.schedule_id, populate_existing=True)
                 if delivery.schedule_id is not None
                 else None
             )
@@ -339,14 +339,22 @@ def process_due_deliveries(
         try:
             subject, body = _compose_delivery_email(db, delivery)
             send_fn(to_email=user.email, subject=subject, body=body)
-            finished_at = max(now, datetime.now(timezone.utc))
+            finished_at = (
+                now
+                if now_utc is not None
+                else max(now, datetime.now(timezone.utc))
+            )
             attempt.status = "success"
             attempt.finished_at_utc = finished_at
             attempt.error_message = None
             delivery.status = "sent"
             delivery.sent_at_utc = finished_at
         except Exception as exc:
-            finished_at = max(now, datetime.now(timezone.utc))
+            finished_at = (
+                now
+                if now_utc is not None
+                else max(now, datetime.now(timezone.utc))
+            )
             attempt.status = "failed"
             attempt.finished_at_utc = finished_at
             attempt.error_message = f"{type(exc).__name__}: {exc}"[:500]
