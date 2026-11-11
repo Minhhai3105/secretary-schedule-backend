@@ -1,6 +1,7 @@
 """Schedule ownership, version, and history tests."""
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 
@@ -8,6 +9,7 @@ from app.api.schedules import (
     cancel_schedule,
     create_schedule,
     get_schedule,
+    list_schedules,
     schedule_history,
     update_schedule,
 )
@@ -33,6 +35,32 @@ class ScheduleTests(DatabaseCase):
         with self.assertRaises(HTTPException) as result:
             get_schedule(schedule.id, self.other_user, self.db)
         self.assertEqual(result.exception.status_code, 404)
+
+    def test_new_schedule_defaults_to_me(self) -> None:
+        schedule = create_schedule(
+            ScheduleCreate(
+                title="Personal meeting",
+                starts_at_utc=datetime.now(timezone.utc) + timedelta(days=2),
+                meeting_mode="offline",
+            ),
+            self.user,
+            self.db,
+        )
+        self.assertEqual(schedule.related_person, "Me")
+
+    def test_me_filter_includes_legacy_toi(self) -> None:
+        schedule = self._create_schedule()
+        day = schedule.starts_at_utc.astimezone(ZoneInfo("Asia/Ho_Chi_Minh")).date()
+        result = list_schedules(
+            from_date=day,
+            to_date=day,
+            related_person="Me",
+            user=self.user,
+            db=self.db,
+        )
+        self.assertEqual([item.id for item in result.schedules], [schedule.id])
+        self.assertEqual(result.schedules[0].related_person, "Me")
+        self.assertEqual(result.related_people, ["Me"])
 
     def test_stale_version_cannot_update_schedule(self) -> None:
         schedule = self._create_schedule()
