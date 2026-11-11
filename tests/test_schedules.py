@@ -6,6 +6,7 @@ from fastapi import HTTPException
 
 from app.api.schedules import (
     cancel_schedule,
+    check_schedule_conflicts,
     create_schedule,
     get_schedule,
     schedule_history,
@@ -60,3 +61,98 @@ class ScheduleTests(DatabaseCase):
         )
         self.assertEqual([item.id for item in history.schedules], [schedule.id])
         self.assertEqual(history.schedules[0].status, "cancelled")
+
+    def test_check_schedule_conflicts_overlapping_and_adjacent(self) -> None:
+        base_time = datetime(2026, 11, 20, 9, 0, tzinfo=timezone.utc)
+        sched = create_schedule(
+            ScheduleCreate(
+                title="Morning sync",
+                starts_at_utc=base_time,
+                ends_at_utc=base_time + timedelta(hours=1),
+                meeting_mode="online",
+            ),
+            self.user,
+            self.db,
+        )
+
+        # Overlapping: 09:30 - 10:30
+        res = check_schedule_conflicts(
+            starts_at_utc=base_time + timedelta(minutes=30),
+            ends_at_utc=base_time + timedelta(hours=1, minutes=30),
+            exclude_id=None,
+            user=self.user,
+            db=self.db,
+        )
+        self.assertTrue(res.has_conflict)
+        self.assertEqual([item.id for item in res.conflicts], [sched.id])
+
+        # Overlapping: 08:30 - 09:30
+        res = check_schedule_conflicts(
+            starts_at_utc=base_time - timedelta(minutes=30),
+            ends_at_utc=base_time + timedelta(minutes=30),
+            exclude_id=None,
+            user=self.user,
+            db=self.db,
+        )
+        self.assertTrue(res.has_conflict)
+
+        # Adjacent before: 08:00 - 09:00 -> No conflict
+        res = check_schedule_conflicts(
+            starts_at_utc=base_time - timedelta(hours=1),
+            ends_at_utc=base_time,
+            exclude_id=None,
+            user=self.user,
+            db=self.db,
+        )
+        self.assertFalse(res.has_conflict)
+        self.assertEqual(len(res.conflicts), 0)
+
+        # Adjacent after: 10:00 - 11:00 -> No conflict
+        res = check_schedule_conflicts(
+            starts_at_utc=base_time + timedelta(hours=1),
+            ends_at_utc=base_time + timedelta(hours=2),
+            exclude_id=None,
+            user=self.user,
+            db=self.db,
+        )
+        self.assertFalse(res.has_conflict)
+
+    def test_check_schedule_conflicts_cancelled_and_exclude_id(self) -> None:
+        base_time = datetime(2026, 11, 20, 14, 0, tzinfo=timezone.utc)
+        sched = create_schedule(
+            ScheduleCreate(
+                title="Afternoon review",
+                starts_at_utc=base_time,
+                ends_at_utc=base_time + timedelta(hours=2),
+                meeting_mode="offline",
+            ),
+            self.user,
+            self.db,
+        )
+
+        # Exclude self when editing: No conflict
+        res = check_schedule_conflicts(
+            starts_at_utc=base_time + timedelta(minutes=30),
+            ends_at_utc=base_time + timedelta(hours=1),
+            exclude_id=sched.id,
+            user=self.user,
+            db=self.db,
+        )
+        self.assertFalse(res.has_conflict)
+
+        # Cancel schedule: should no longer conflict
+        cancel_schedule(
+            sched.id,
+            ScheduleCancel(version=1),
+            self.user,
+            self.db,
+        )
+        res = check_schedule_conflicts(
+            starts_at_utc=base_time + timedelta(minutes=30),
+            ends_at_utc=base_time + timedelta(hours=1),
+            exclude_id=None,
+            user=self.user,
+            db=self.db,
+        )
+        self.assertFalse(res.has_conflict)
+
