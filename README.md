@@ -22,11 +22,14 @@ Run the PostgreSQL-backed flow tests with `DATABASE_URL` set (and `PGPASSFILE` i
 ./.venv/bin/python -m unittest discover -s tests -v
 ./.venv/bin/python -m unittest tests.test_schedules -v
 ./.venv/bin/python -m unittest tests.test_chat_proposals -v
+./.venv/bin/python -m unittest tests.test_chat_history -v
 ```
 
 You can also run one case by its full name, for example `./.venv/bin/python -m unittest tests.test_schedules.ScheduleTests.test_stale_version_cannot_update_schedule -v`.
 
 The five pre-merge development migrations were consolidated into `001_initial_schema.py`. A fresh database uses `alembic upgrade head`. An existing development database at the former revision must have its schema checked before its revision marker is changed to `001`; this does not recreate application tables. When adding later migrations, use the current head as `down_revision`. Numbered filenames alone do not prevent conflicts when two branches create migrations in parallel.
+
+Migration `002_chat_messages.py` adds account-scoped chat history. `GET /api/chat/messages?limit=20&cursor=<message UUID>` returns newest messages first, at most 50 per page, and a `next_cursor` for older messages. `POST /api/chat/messages` now loads the five most recent turns from PostgreSQL as AI context. The legacy request `history` field remains accepted for older clients but is ignored. `PATCH /api/reminder-settings` updates only supplied settings; the existing full-replacement `PUT` remains available.
 
 ## External services
 

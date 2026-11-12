@@ -149,3 +149,9 @@ class PageInfo(BaseModel):
 class ScheduleHistoryResponse(BaseModel):
     schedules: list[ScheduleResponse]
     paging: PageInfo
+
+
+class ScheduleConflictResponse(BaseModel):
+    has_conflict: bool
+    conflicts: list[ScheduleResponse]
+
