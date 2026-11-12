@@ -1,0 +1,9 @@
+model_list:
+  - model_name: secretary-schedule
+    litellm_params:
+      model: openai/gemini-3.8-flash-high
+      api_base: os.environ/CLIPROXY_BASE_URL
+      api_key: os.environ/CLIPROXY_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

@@ -44,7 +44,7 @@ Migration `002_chat_messages.py` adds account-scoped chat history. `GET /api/cha
 
 ## External services
 
-- Chat: set `AI_API_KEY`; optional `AI_BASE_URL` (default `http://127.0.0.1:8317/v1`), `AI_MODEL` (default `gemini-3.8-flash-high`), and `AI_TIMEOUT_SECONDS` (default 60). The base URL must be reachable from the running backend. The local CLIProxyAPI address will not work on a remote server unless that service is deployed there too.
+- Chat: set `AI_API_KEY`; optional `AI_BASE_URL` (default `http://127.0.0.1:4000/v1`), `AI_MODEL` (default `secretary-schedule`), and `AI_TIMEOUT_SECONDS` (default 120). The base URL must be reachable from the running backend. Run LiteLLM separately with `gateway/config.yaml`. The backend sends a strict JSON Schema through the OpenAI-compatible Chat Completions API, validates the response, then uses the existing proposal confirmation flow. See [gateway/README.md](gateway/README.md) for local startup and deployment notes.
 - Password reset & reminders: set `SMTP_HOST`, `SMTP_USERNAME`, and `SMTP_PASSWORD`; optional `SMTP_PORT` (default 465), `SMTP_FROM`, and `SMTP_TIMEOUT_SECONDS` (default 30). Password reset also needs `APP_FRONTEND_URL`, an HTTP(S) frontend base URL used only to build the link in the email. The backend does not call the frontend. The reset endpoint returns 503 when its required configuration is missing or the frontend URL is invalid.
 - Frontend: set `CORS_ORIGINS` to a comma-separated list of exact frontend origins. Local Vite defaults are `http://localhost:5173,http://127.0.0.1:5173`.
 
