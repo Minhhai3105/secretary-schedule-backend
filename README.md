@@ -29,8 +29,8 @@ Run the PostgreSQL-backed flow tests with `DATABASE_URL` set (and `PGPASSFILE` i
 Run the email reminder worker once or continuously:
 
 ```sh
-./.venv/bin/python -m app.worker --once
-./.venv/bin/python -m app.worker --interval 30
+./.venv/bin/python -m scripts.reminder_worker --once
+./.venv/bin/python -m scripts.reminder_worker --interval 30
 ```
 
 Run one continuous worker process alongside FastAPI in deployment; `--interval 30` polls every 30 seconds. `--once` is for a manual check or an external scheduler such as cron, not a test-only mode. The current worker does not coordinate multiple concurrent instances.
