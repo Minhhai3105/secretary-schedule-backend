@@ -20,13 +20,13 @@ Chat sends up to five prior turns and at most 200 of the user's schedules to the
 
 - PostgreSQL migrations applied; nine tables and constraints exist; Alembic model/schema comparison is clean.
 - Auth register, login, refresh rotation and replay rejection, logout, `me`, password hashing, and permission checks were exercised in local development.
-- Schedule and chat proposal checks are split into six independently runnable PostgreSQL-backed test cases; test data was rolled back. Settings, email audit, and password reset were exercised in earlier local checks.
-- Real HTTP requests returned 200 for login, schedule list, reminder settings, and email audit, and 401 for an unauthenticated schedule list.
-- The local AI proxy returned a JSON question for a missing-time chat request. A complete-data request failed once at the previous 30-second limit and again with a 502 response after raising the timeout to 60 seconds. This AI path is not yet accepted as reliable.
+- Schedule, chat proposal, reminder worker, and password reset checks are split into PostgreSQL-backed test modules (`test_schedules`, `test_chat_proposals`, `test_reminders`, `test_password_reset`); test data is rolled back after each test.
+- Email reminder worker (`app/services/reminders.py`, `scripts/reminder_worker.py`) enqueues `daily`, `near`, and `update` deliveries with idempotent `event_key`s, cancels obsolete `near`/`update` deliveries (`pending` or `failed`) when schedules advance to a newer version or are cancelled, refreshes schedule state from PostgreSQL (`populate_existing=True`) immediately before sending, and executes up to 4 `EmailAttempt`s per delivery.
+- Real Gmail SMTP (`smtp.gmail.com:465` over SSL) delivery has been verified in local development alongside mocked unit tests for `SMTP_SSL` (port 465) and `SMTP` STARTTLS (port 587).
 
 ## Not yet verified or implemented
 
-- SMTP credentials and a real password reset email are not configured; the email background task is not durable across a process crash.
-- The email reminder worker that creates deliveries, sends mail, and retries failed attempts is not implemented. The audit API reads data if delivery rows exist.
+- The password-reset email background task is in-process (`BackgroundTasks`) and not durable across a process crash.
+- The reminder worker is designed to run as a single process (`python -m scripts.reminder_worker`); multi-worker concurrent locking (`FOR UPDATE SKIP LOCKED`) is not yet implemented.
 - The local CLIProxyAPI and its key are not packaged for deployment; production AI access needs a reachable, authorized provider and secret configuration.
 - No load test has demonstrated the requested ten concurrent users. Rate limiting, deployment configuration, and frontend integration remain to be done.
