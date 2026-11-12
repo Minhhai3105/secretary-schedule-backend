@@ -10,6 +10,11 @@ from app.models.email_delivery import EmailDelivery
 from app.models.reminder_setting import ReminderSetting
 from app.models.schedule import Schedule
 from app.models.user import User
+from app.services.email_template import (
+    render_daily_summary_html,
+    render_near_reminder_html,
+    render_update_notification_html,
+)
 from app.services.mailer import send_email_message
 
 VIETNAM_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
@@ -182,7 +187,7 @@ def enqueue_due_reminders(
 
 def _compose_delivery_email(
     db: Session, delivery: EmailDelivery
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     if delivery.kind == "daily":
         target_date = (
             delivery.applicable_date_vietnam
@@ -210,18 +215,32 @@ def _compose_delivery_email(
                 f"You have no scheduled meetings on {target_date.isoformat()} "
                 "(Asia/Ho_Chi_Minh)."
             )
+            html_body = render_daily_summary_html(date_str=target_date.isoformat(), schedules=[])
         else:
             lines = [
                 f"Your schedule summary for {target_date.isoformat()} (Asia/Ho_Chi_Minh):",
                 "",
             ]
+            schedules_data: list[dict[str, str | None]] = []
             for idx, item in enumerate(schedules, start=1):
+                start_str = _format_vn_datetime(item.starts_at_utc)
+                end_str = _format_vn_datetime(item.ends_at_utc) if item.ends_at_utc else ""
+                time_range = f"{start_str} - {end_str}" if end_str else start_str
                 lines.append(
-                    f"{idx}. {item.title} — {_format_vn_datetime(item.starts_at_utc)} "
+                    f"{idx}. {item.title} — {start_str} "
                     f"({item.meeting_mode}, related: {item.related_person})"
                 )
+                schedules_data.append({
+                    "title": item.title,
+                    "time_range": time_range,
+                    "mode": item.meeting_mode,
+                    "related_person": item.related_person,
+                    "location": item.location,
+                    "meeting_url": item.meeting_url,
+                })
             body = "\n".join(lines)
-        return subject, body
+            html_body = render_daily_summary_html(date_str=target_date.isoformat(), schedules=schedules_data)
+        return subject, body, html_body
 
     schedule = (
         db.get(Schedule, delivery.schedule_id, populate_existing=True)
@@ -231,12 +250,15 @@ def _compose_delivery_email(
     if schedule is None:
         raise RuntimeError("Associated schedule not found")
 
+    start_str = _format_vn_datetime(schedule.starts_at_utc)
+    end_str = _format_vn_datetime(schedule.ends_at_utc) if schedule.ends_at_utc else None
+
     if delivery.kind == "near":
         subject = f"[Secretary Schedule] Upcoming: {schedule.title}"
         lines = [
             f"Reminder for your upcoming schedule: {schedule.title}",
-            f"Starts at: {_format_vn_datetime(schedule.starts_at_utc)}",
-            f"Ends at: {_format_vn_datetime(schedule.ends_at_utc)}",
+            f"Starts at: {start_str}",
+            f"Ends at: {end_str or 'N/A'}",
             f"Mode: {schedule.meeting_mode}",
             f"Related person: {schedule.related_person}",
         ]
@@ -248,20 +270,41 @@ def _compose_delivery_email(
             lines.append(f"Preparation: {schedule.preparation}")
         if schedule.notes:
             lines.append(f"Notes: {schedule.notes}")
-        return subject, "\n".join(lines)
+        body = "\n".join(lines)
+        html_body = render_near_reminder_html(
+            title=schedule.title,
+            starts_at=start_str,
+            ends_at=end_str,
+            meeting_mode=schedule.meeting_mode,
+            related_person=schedule.related_person,
+            location=schedule.location,
+            meeting_url=schedule.meeting_url,
+            preparation=schedule.preparation,
+            notes=schedule.notes,
+        )
+        return subject, body, html_body
 
-    status_label = (
-        "Cancelled" if schedule.cancelled_at_utc is not None else "Updated"
-    )
+    is_cancelled = schedule.cancelled_at_utc is not None
+    status_label = "Cancelled" if is_cancelled else "Updated"
     subject = f"[Secretary Schedule] {status_label}: {schedule.title}"
     lines = [
         f"Your schedule '{schedule.title}' was {status_label.lower()} (version {schedule.version}).",
-        f"Starts at: {_format_vn_datetime(schedule.starts_at_utc)}",
-        f"Ends at: {_format_vn_datetime(schedule.ends_at_utc)}",
+        f"Starts at: {start_str}",
+        f"Ends at: {end_str or 'N/A'}",
         f"Mode: {schedule.meeting_mode}",
         f"Related person: {schedule.related_person}",
     ]
-    return subject, "\n".join(lines)
+    body = "\n".join(lines)
+    html_body = render_update_notification_html(
+        title=schedule.title,
+        version=schedule.version,
+        starts_at=start_str,
+        ends_at=end_str,
+        meeting_mode=schedule.meeting_mode,
+        related_person=schedule.related_person,
+        is_cancelled=is_cancelled,
+    )
+    return subject, body, html_body
 
 
 def process_due_deliveries(
@@ -279,6 +322,7 @@ def process_due_deliveries(
             EmailDelivery.status.in_(("pending", "failed")),
         )
         .order_by(EmailDelivery.due_at_utc, EmailDelivery.id)
+        .with_for_update(skip_locked=True)
     ).all()
 
     processed: list[EmailDelivery] = []
@@ -337,8 +381,16 @@ def process_due_deliveries(
         db.flush()
 
         try:
-            subject, body = _compose_delivery_email(db, delivery)
-            send_fn(to_email=user.email, subject=subject, body=body)
+            subject, body, html_body = _compose_delivery_email(db, delivery)
+            try:
+                send_fn(
+                    to_email=user.email,
+                    subject=subject,
+                    body=body,
+                    html_body=html_body,
+                )
+            except TypeError:
+                send_fn(to_email=user.email, subject=subject, body=body)
             finished_at = (
                 now
                 if now_utc is not None

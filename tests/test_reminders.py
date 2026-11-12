@@ -357,3 +357,127 @@ class ReminderWorkerTests(DatabaseCase):
             )
             smtp_instance.send_message.assert_called_once()
 
+    def test_mailer_delivers_multipart_alternative_with_html_body(self) -> None:
+        ssl_env = {
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_PORT": "465",
+            "SMTP_USERNAME": "bot@example.com",
+            "SMTP_PASSWORD": "secret-password",
+        }
+        with patch.dict("os.environ", ssl_env, clear=False), patch(
+            "app.services.mailer.smtplib.SMTP_SSL"
+        ) as mock_smtp_ssl_cls:
+            ssl_instance = MagicMock()
+            mock_smtp_ssl_cls.return_value.__enter__.return_value = ssl_instance
+            send_email_message(
+                to_email="user@example.com",
+                subject="Test HTML Reminder",
+                body="Plain text reminder",
+                html_body="<p>HTML formatted reminder</p>",
+            )
+            self.assertEqual(ssl_instance.send_message.call_count, 1)
+            msg = ssl_instance.send_message.call_args[0][0]
+            self.assertTrue(msg.is_multipart())
+            payloads = msg.get_payload()
+            self.assertEqual(len(payloads), 2)
+            self.assertEqual(payloads[0].get_content_type(), "text/plain")
+            self.assertIn("Plain text reminder", payloads[0].get_payload())
+            self.assertEqual(payloads[1].get_content_type(), "text/html")
+            self.assertIn("<p>HTML formatted reminder</p>", payloads[1].get_payload())
+
+    def test_deliveries_send_both_plain_text_and_html_body(self) -> None:
+        now = self._relative_morning_utc()
+        schedule = create_schedule(
+            ScheduleCreate(
+                title="Sprint Planning & Review",
+                starts_at_utc=now + timedelta(minutes=20),
+                meeting_mode="online",
+                meeting_url="https://meet.google.com/abc-xyz",
+                preparation="Review backlog tickets",
+                notes="Bring story point estimates",
+            ),
+            self.user,
+            self.db,
+        )
+
+        sent_deliveries: list[dict[str, str]] = []
+
+        def capture_send(*, to_email: str, subject: str, body: str, html_body: str | None = None) -> None:
+            sent_deliveries.append({
+                "to": to_email,
+                "subject": subject,
+                "body": body,
+                "html": html_body or "",
+            })
+
+        enqueue_due_reminders(self.db, now_utc=now)
+        processed = process_due_deliveries(
+            self.db,
+            now_utc=now,
+            retry_delay=timedelta(0),
+            send_fn=capture_send,
+        )
+
+        near_item = next(item for item in sent_deliveries if "Upcoming" in item["subject"])
+        self.assertIn("Sprint Planning & Review", near_item["subject"])
+        # Plain text assertions
+        self.assertIn("https://meet.google.com/abc-xyz", near_item["body"])
+        self.assertIn("Review backlog tickets", near_item["body"])
+        # HTML assertions
+        self.assertIn("Tham gia cuộc họp", near_item["html"])
+        self.assertIn("https://meet.google.com/abc-xyz", near_item["html"])
+        self.assertIn("Review backlog tickets", near_item["html"])
+        self.assertIn("Bring story point estimates", near_item["html"])
+
+    def test_email_templates_escape_html_against_xss(self) -> None:
+        from app.services.email_template import (
+            render_daily_summary_html,
+            render_near_reminder_html,
+            render_password_reset_html,
+            render_update_notification_html,
+        )
+
+        xss_payload = "<script>alert('xss')</script>"
+        html_near = render_near_reminder_html(
+            title=xss_payload,
+            starts_at="2026-11-12 10:00",
+            ends_at=None,
+            meeting_mode="offline",
+            related_person=xss_payload,
+            location=xss_payload,
+            preparation=xss_payload,
+            notes=xss_payload,
+        )
+        self.assertNotIn("<script>", html_near)
+        self.assertIn("&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;", html_near)
+
+        html_daily = render_daily_summary_html(
+            date_str="2026-11-12",
+            schedules=[{
+                "title": xss_payload,
+                "time_range": "10:00 - 11:00",
+                "mode": "offline",
+                "related_person": xss_payload,
+            }],
+        )
+        self.assertNotIn("<script>", html_daily)
+        self.assertIn("&lt;script&gt;", html_daily)
+
+        html_update = render_update_notification_html(
+            title=xss_payload,
+            version=2,
+            starts_at="10:00",
+            ends_at="11:00",
+            meeting_mode="offline",
+            related_person=xss_payload,
+            is_cancelled=False,
+        )
+        self.assertNotIn("<script>", html_update)
+        self.assertIn("&lt;script&gt;", html_update)
+
+        html_reset = render_password_reset_html(
+            reset_url="http://localhost:5173/reset-password?token=123\"onclick=\"alert(1)"
+        )
+        self.assertNotIn("\"onclick=", html_reset)
+        self.assertIn("&quot;onclick=", html_reset)
+

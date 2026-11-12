@@ -5,6 +5,8 @@ from email.message import EmailMessage
 from os import environ
 from urllib.parse import quote, urlsplit
 
+from app.services.email_template import render_password_reset_html
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,7 +48,13 @@ def password_reset_mail_configured() -> bool:
     return smtp_configured() and _frontend_base_url() is not None
 
 
-def send_email_message(*, to_email: str, subject: str, body: str) -> None:
+def send_email_message(
+    *,
+    to_email: str,
+    subject: str,
+    body: str,
+    html_body: str | None = None,
+) -> None:
     if not smtp_configured():
         raise RuntimeError("SMTP is not configured")
 
@@ -64,6 +72,8 @@ def send_email_message(*, to_email: str, subject: str, body: str) -> None:
     message["From"] = sender
     message["To"] = to_email
     message.set_content(body)
+    if html_body:
+        message.add_alternative(html_body, subtype="html")
 
     use_ssl = port == 465 or environ.get("SMTP_SSL", "").lower() in ("1", "true")
     use_starttls = port == 587 or environ.get("SMTP_STARTTLS", "").lower() in (
@@ -104,11 +114,13 @@ def send_password_reset_email(to_email: str, raw_token: str) -> None:
         + reset_url
         + "\n\nIf you did not request this, ignore this email."
     )
+    html_body = render_password_reset_html(reset_url=reset_url)
     try:
         send_email_message(
             to_email=to_email,
             subject="Reset your Secretary Schedule password",
             body=body,
+            html_body=html_body,
         )
     except Exception as exc:
         logger.error("Password reset email failed: %s", type(exc).__name__)
