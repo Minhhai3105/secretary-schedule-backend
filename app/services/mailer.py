@@ -3,7 +3,7 @@ import smtplib
 import ssl
 from email.message import EmailMessage
 from os import environ
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +20,30 @@ def smtp_configured() -> bool:
     return True
 
 
+def _frontend_base_url() -> str | None:
+    value = environ.get("APP_FRONTEND_URL", "").strip()
+    if not value or any(character.isspace() for character in value):
+        return None
+    try:
+        parsed = urlsplit(value)
+        valid_port = parsed.port is None or parsed.port > 0
+    except ValueError:
+        return None
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.hostname
+        or not valid_port
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return value.rstrip("/")
+
+
 def password_reset_mail_configured() -> bool:
-    return smtp_configured() and bool(environ.get("APP_FRONTEND_URL", "").strip())
+    return smtp_configured() and _frontend_base_url() is not None
 
 
 def send_email_message(*, to_email: str, subject: str, body: str) -> None:
@@ -69,8 +91,11 @@ def send_email_message(*, to_email: str, subject: str, body: str) -> None:
 
 
 def send_password_reset_email(to_email: str, raw_token: str) -> None:
+    frontend_url = _frontend_base_url()
+    if frontend_url is None:
+        raise RuntimeError("APP_FRONTEND_URL must be an HTTP(S) frontend URL")
     reset_url = (
-        environ["APP_FRONTEND_URL"].rstrip("/")
+        frontend_url
         + "/reset-password?token="
         + quote(raw_token, safe="")
     )

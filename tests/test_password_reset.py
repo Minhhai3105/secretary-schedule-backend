@@ -10,6 +10,11 @@ from app.core.security import verify_password
 from app.models.auth_session import AuthSession
 from app.models.refresh_token import RefreshToken
 from app.schemas.password_reset import ForgotPasswordRequest, ResetPasswordRequest
+from app.services.mailer import (
+    password_reset_mail_configured,
+    send_password_reset_email,
+    smtp_configured,
+)
 from tests._db_case import DatabaseCase
 
 
@@ -28,6 +33,32 @@ class PasswordResetTests(DatabaseCase):
                     self.db,
                 )
             self.assertEqual(ctx.exception.status_code, 503)
+
+    def test_password_reset_requires_valid_frontend_url_and_builds_link(self) -> None:
+        smtp_env = {
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_USERNAME": "noreply@example.com",
+            "SMTP_PASSWORD": "test-only",
+        }
+        invalid_urls = (
+            "", "example.com", "ftp://example.com", "https://example.com?x=1",
+            "https://example.com:bad", "https://user:pass@example.com",
+        )
+        for frontend_url in invalid_urls:
+            with self.subTest(frontend_url=frontend_url):
+                with patch.dict("os.environ", {**smtp_env, "APP_FRONTEND_URL": frontend_url}):
+                    self.assertTrue(smtp_configured())
+                    self.assertFalse(password_reset_mail_configured())
+
+        with patch.dict(
+            "os.environ", {**smtp_env, "APP_FRONTEND_URL": "http://localhost:5173/"},
+        ), patch("app.services.mailer.send_email_message") as send:
+            self.assertTrue(password_reset_mail_configured())
+            send_password_reset_email("user@example.com", "token with spaces")
+            self.assertIn(
+                "http://localhost:5173/reset-password?token=token%20with%20spaces",
+                send.call_args.kwargs["body"],
+            )
 
     def test_forgot_and_reset_password_updates_hash_and_revokes_sessions(self) -> None:
         now = datetime.now(timezone.utc)

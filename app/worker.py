@@ -1,3 +1,5 @@
+"""Run the reminder sender as a separate process from the FastAPI server."""
+
 import argparse
 import logging
 import time

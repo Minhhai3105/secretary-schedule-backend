@@ -33,6 +33,8 @@ Run the email reminder worker once or continuously:
 ./.venv/bin/python -m app.worker --interval 30
 ```
 
+Run one continuous worker process alongside FastAPI in deployment; `--interval 30` polls every 30 seconds. `--once` is for a manual check or an external scheduler such as cron, not a test-only mode. The current worker does not coordinate multiple concurrent instances.
+
 You can also run one case by its full name, for example `./.venv/bin/python -m unittest tests.test_schedules.ScheduleTests.test_stale_version_cannot_update_schedule -v`.
 
 The five pre-merge development migrations were consolidated into `001_initial_schema.py`. A fresh database uses `alembic upgrade head`. An existing development database at the former revision must have its schema checked before its revision marker is changed to `001`; this does not recreate application tables. When adding later migrations, use the current head as `down_revision`. Numbered filenames alone do not prevent conflicts when two branches create migrations in parallel.
@@ -40,7 +42,7 @@ The five pre-merge development migrations were consolidated into `001_initial_sc
 ## External services
 
 - Chat: set `AI_API_KEY`; optional `AI_BASE_URL` (default `http://127.0.0.1:8317/v1`), `AI_MODEL` (default `gemini-3.8-flash-high`), and `AI_TIMEOUT_SECONDS` (default 60). The base URL must be reachable from the running backend. The local CLIProxyAPI address will not work on a remote server unless that service is deployed there too.
-- Password reset & reminders: set `SMTP_HOST`, `SMTP_USERNAME`, `SMTP_PASSWORD`, and `APP_FRONTEND_URL`; optional `SMTP_PORT` (default 465), `SMTP_FROM`, and `SMTP_TIMEOUT_SECONDS` (default 30). The reset endpoint returns 503 until these are set.
+- Password reset & reminders: set `SMTP_HOST`, `SMTP_USERNAME`, and `SMTP_PASSWORD`; optional `SMTP_PORT` (default 465), `SMTP_FROM`, and `SMTP_TIMEOUT_SECONDS` (default 30). Password reset also needs `APP_FRONTEND_URL`, an HTTP(S) frontend base URL used only to build the link in the email. The backend does not call the frontend. The reset endpoint returns 503 when its required configuration is missing or the frontend URL is invalid.
 - Frontend: set `CORS_ORIGINS` to a comma-separated list of exact frontend origins. Local Vite defaults are `http://localhost:5173,http://127.0.0.1:5173`.
 
 See [backend_status.md](docs/backend_status.md) for the implemented API and known limits.
