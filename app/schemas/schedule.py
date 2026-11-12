@@ -23,7 +23,7 @@ class ScheduleCreate(BaseModel):
     meeting_mode: Literal["online", "offline"]
     location: str | None = Field(default=None, max_length=500)
     meeting_url: HttpUrl | None = Field(default=None, max_length=2048)
-    related_person: str = Field(default="Tôi", max_length=255)
+    related_person: str = Field(default="Me", max_length=255)
     preparation: str | None = None
     notes: str | None = None
 
@@ -39,9 +39,10 @@ class ScheduleCreate(BaseModel):
     @classmethod
     def clean_related_person(cls, value: object) -> object:
         if value is None:
-            return "Tôi"
+            return "Me"
         if isinstance(value, str):
-            return value.strip() or "Tôi"
+            person = value.strip()
+            return "Me" if person in {"", "Tôi"} else person
         return value
 
     @field_validator("starts_at_utc", "ends_at_utc")
@@ -106,9 +107,10 @@ class ScheduleUpdate(BaseModel):
     @classmethod
     def clean_related_person(cls, value: object) -> object:
         if value is None:
-            return "Tôi"
+            return "Me"
         if isinstance(value, str):
-            return value.strip() or "Tôi"
+            person = value.strip()
+            return "Me" if person in {"", "Tôi"} else person
         return value
 
     @field_validator("starts_at_utc", "ends_at_utc")
@@ -147,3 +149,9 @@ class PageInfo(BaseModel):
 class ScheduleHistoryResponse(BaseModel):
     schedules: list[ScheduleResponse]
     paging: PageInfo
+
+
+class ScheduleConflictResponse(BaseModel):
+    has_conflict: bool
+    conflicts: list[ScheduleResponse]
+

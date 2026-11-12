@@ -4,7 +4,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_current_user
@@ -14,6 +14,7 @@ from app.models.user import User
 from app.schemas.schedule import (
     PageInfo,
     ScheduleCancel,
+    ScheduleConflictResponse,
     ScheduleCreate,
     ScheduleHistoryResponse,
     ScheduleListResponse,
@@ -93,9 +94,11 @@ def list_schedules(
         Schedule.starts_at_utc < end_utc,
     )
     if related_person and related_person.strip():
-        statement = statement.where(
-            Schedule.related_person == related_person.strip()
-        )
+        person = related_person.strip()
+        if person in {"Me", "Tôi"}:
+            statement = statement.where(Schedule.related_person.in_(("Me", "Tôi")))
+        else:
+            statement = statement.where(Schedule.related_person == person)
 
     schedules = db.scalars(
         statement.order_by(Schedule.starts_at_utc, Schedule.id)
@@ -108,7 +111,9 @@ def list_schedules(
     ).all()
     return ScheduleListResponse(
         schedules=[ScheduleResponse.model_validate(item) for item in schedules],
-        related_people=sorted(set(people) | {"Tôi"}),
+        related_people=sorted(
+            {"Me" if person == "Tôi" else person for person in people} | {"Me"}
+        ),
     )
 
 
@@ -167,6 +172,73 @@ def schedule_history(
             total=total,
             total_pages=(total + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE,
         ),
+    )
+
+
+@router.get("/conflicts", response_model=ScheduleConflictResponse)
+def check_schedule_conflicts(
+    starts_at_utc: datetime = Query(...),
+    ends_at_utc: datetime | None = Query(default=None),
+    exclude_id: UUID | None = Query(default=None),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ScheduleConflictResponse:
+    if starts_at_utc.tzinfo is None:
+        starts_at_utc = starts_at_utc.replace(tzinfo=timezone.utc)
+    else:
+        starts_at_utc = starts_at_utc.astimezone(timezone.utc)
+
+    if ends_at_utc is not None:
+        if ends_at_utc.tzinfo is None:
+            ends_at_utc = ends_at_utc.replace(tzinfo=timezone.utc)
+        else:
+            ends_at_utc = ends_at_utc.astimezone(timezone.utc)
+        if ends_at_utc <= starts_at_utc:
+            raise HTTPException(
+                status_code=422, detail="End time must be after start time"
+            )
+
+    statement = select(Schedule).where(
+        Schedule.user_id == user.id,
+        Schedule.cancelled_at_utc.is_(None),
+    )
+    if exclude_id is not None:
+        statement = statement.where(Schedule.id != exclude_id)
+
+    if ends_at_utc is not None:
+        overlap_condition = or_(
+            and_(
+                Schedule.ends_at_utc.is_not(None),
+                Schedule.starts_at_utc < ends_at_utc,
+                Schedule.ends_at_utc > starts_at_utc,
+            ),
+            and_(
+                Schedule.ends_at_utc.is_(None),
+                Schedule.starts_at_utc >= starts_at_utc,
+                Schedule.starts_at_utc < ends_at_utc,
+            ),
+        )
+    else:
+        overlap_condition = or_(
+            and_(
+                Schedule.ends_at_utc.is_not(None),
+                Schedule.starts_at_utc <= starts_at_utc,
+                Schedule.ends_at_utc > starts_at_utc,
+            ),
+            and_(
+                Schedule.ends_at_utc.is_(None),
+                Schedule.starts_at_utc == starts_at_utc,
+            ),
+        )
+
+    conflicts = db.scalars(
+        statement.where(overlap_condition).order_by(
+            Schedule.starts_at_utc, Schedule.id
+        )
+    ).all()
+    return ScheduleConflictResponse(
+        has_conflict=bool(conflicts),
+        conflicts=[ScheduleResponse.model_validate(item) for item in conflicts],
     )
 
 
