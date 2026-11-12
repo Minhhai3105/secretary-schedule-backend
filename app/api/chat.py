@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -19,6 +19,7 @@ from app.schemas.chat import (
     ChatConfirmResponse,
     ChatHistoryItem,
     ChatHistoryPage,
+    ChatHistoryQuery,
     ChatMessageRequest,
     ChatMessageResponse,
     ChatProposalResponse,
@@ -75,11 +76,12 @@ def _save_exchange(
 
 @router.get("/messages", response_model=ChatHistoryPage)
 def list_chat_messages(
-    limit: int = Query(default=20, ge=1, le=50),
-    cursor: UUID | None = None,
+    pagination: Annotated[ChatHistoryQuery, Query()],
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ChatHistoryPage:
+    limit = pagination.limit
+    cursor = pagination.cursor
     query = select(ChatMessage).where(ChatMessage.user_id == user.id)
     if cursor is not None:
         anchor = db.scalar(query.where(ChatMessage.id == cursor))

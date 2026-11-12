@@ -5,11 +5,12 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from app.api.chat import chat_message, confirm_proposal, list_chat_messages
 from app.models.chat_message import ChatMessage
-from app.schemas.chat import ChatMessageRequest
+from app.schemas.chat import ChatHistoryQuery, ChatMessageRequest
 from tests._db_case import DatabaseCase
 
 
@@ -40,26 +41,40 @@ class ChatHistoryTests(DatabaseCase):
                 created_at_utc=start + timedelta(seconds=index),
             ))
         self.db.commit()
-        first = list_chat_messages(limit=2, cursor=None, user=self.user, db=self.db)
+        first = list_chat_messages(
+            pagination=ChatHistoryQuery(limit=2), user=self.user, db=self.db,
+        )
         second = list_chat_messages(
-            limit=2, cursor=first.next_cursor, user=self.user, db=self.db,
+            pagination=ChatHistoryQuery(limit=2, cursor=first.next_cursor),
+            user=self.user, db=self.db,
         )
         third = list_chat_messages(
-            limit=2, cursor=second.next_cursor, user=self.user, db=self.db,
+            pagination=ChatHistoryQuery(limit=2, cursor=second.next_cursor),
+            user=self.user, db=self.db,
         )
         self.assertEqual([item.content for item in first.messages], ["Message 4", "Message 3"])
         self.assertEqual([item.content for item in second.messages], ["Message 2", "Message 1"])
         self.assertEqual([item.content for item in third.messages], ["Message 0"])
         self.assertIsNone(third.next_cursor)
         self.assertEqual(
-            list_chat_messages(limit=20, cursor=None, user=self.other_user, db=self.db).messages,
+            list_chat_messages(
+                pagination=ChatHistoryQuery(), user=self.other_user, db=self.db,
+            ).messages,
             [],
         )
         with self.assertRaises(HTTPException) as error:
             list_chat_messages(
-                limit=2, cursor=first.next_cursor, user=self.other_user, db=self.db,
+                pagination=ChatHistoryQuery(limit=2, cursor=first.next_cursor),
+                user=self.other_user, db=self.db,
             )
         self.assertEqual(error.exception.status_code, 400)
+
+    def test_history_query_limit_bounds(self) -> None:
+        self.assertEqual(ChatHistoryQuery().limit, 20)
+        self.assertEqual(ChatHistoryQuery(limit=50).limit, 50)
+        for value in (0, 51):
+            with self.assertRaises(ValidationError):
+                ChatHistoryQuery(limit=value)
 
     def test_failed_ai_does_not_store_user_message(self) -> None:
         with patch(
@@ -86,9 +101,13 @@ class ChatHistoryTests(DatabaseCase):
             response = chat_message(
                 ChatMessageRequest(message="Create meeting"), self.user, self.db,
             )
-        page = list_chat_messages(limit=20, cursor=None, user=self.user, db=self.db)
+        page = list_chat_messages(
+            pagination=ChatHistoryQuery(), user=self.user, db=self.db,
+        )
         self.assertEqual(page.messages[0].proposal_state, "pending")
         self.assertEqual(page.messages[0].proposal.id, response.proposal.id)
         confirm_proposal(response.proposal.id, self.user, self.db)
-        page = list_chat_messages(limit=20, cursor=None, user=self.user, db=self.db)
+        page = list_chat_messages(
+            pagination=ChatHistoryQuery(), user=self.user, db=self.db,
+        )
         self.assertEqual(page.messages[0].proposal_state, "confirmed")
