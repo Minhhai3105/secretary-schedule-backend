@@ -93,9 +93,11 @@ def list_schedules(
         Schedule.starts_at_utc < end_utc,
     )
     if related_person and related_person.strip():
-        statement = statement.where(
-            Schedule.related_person == related_person.strip()
-        )
+        person = related_person.strip()
+        if person in {"Me", "Tôi"}:
+            statement = statement.where(Schedule.related_person.in_(("Me", "Tôi")))
+        else:
+            statement = statement.where(Schedule.related_person == person)
 
     schedules = db.scalars(
         statement.order_by(Schedule.starts_at_utc, Schedule.id)
@@ -108,7 +110,9 @@ def list_schedules(
     ).all()
     return ScheduleListResponse(
         schedules=[ScheduleResponse.model_validate(item) for item in schedules],
-        related_people=sorted(set(people) | {"Tôi"}),
+        related_people=sorted(
+            {"Me" if person == "Tôi" else person for person in people} | {"Me"}
+        ),
     )
 
 

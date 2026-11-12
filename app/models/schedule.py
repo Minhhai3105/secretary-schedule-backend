@@ -45,7 +45,7 @@ class Schedule(Base):
     location: Mapped[str | None] = mapped_column(String(500), nullable=True)
     meeting_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     related_person: Mapped[str] = mapped_column(
-        String(255), nullable=False, server_default="Tôi",
+        String(255), nullable=False, server_default="Me",
     )
     preparation: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
