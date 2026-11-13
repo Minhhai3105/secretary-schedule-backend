@@ -9,6 +9,7 @@ Use Python 3.14 and PostgreSQL 18. Install the pinned packages in `requirements.
 Copy `.env.example` to `.env` and replace the placeholders. The app reads environment variables; it does not load `.env` automatically. In a local shell, run `set -a; . ./.env; set +a` before the commands below. Keep `.env` untracked.
 
 ```sh
+python3.14 -m venv .venv
 ./.venv/bin/python -m pip install -r requirements.txt
 ./.venv/bin/python -m alembic upgrade head
 ./.venv/bin/python -m uvicorn app.main:app --reload
@@ -47,7 +48,7 @@ Migration `003_chat_messages.py` adds account-scoped chat history. `GET /api/cha
 
 ## External services
 
-- Chat: set `AI_API_KEY`; optional `AI_BASE_URL` (default `http://127.0.0.1:4000/v1`), `AI_MODEL` (default `secretary-schedule`), and `AI_TIMEOUT_SECONDS` (default 120). The base URL must be reachable from the running backend. Run LiteLLM separately with `gateway/config.yaml`. The backend sends a strict JSON Schema through the OpenAI-compatible Chat Completions API, validates the response, then uses the existing proposal confirmation flow. See [gateway/README.md](gateway/README.md) for local startup and deployment notes.
+- Chat: FastAPI calls CLIProxyAPI directly at `AI_BASE_URL` (default `http://127.0.0.1:8317/v1`) using `AI_API_KEY` (the CLIProxyAPI client key), `AI_MODEL` (default `gemini-3.8-flash-high`), and `AI_TIMEOUT_SECONDS` (default 120). LiteLLM is not required. Start and authenticate CLIProxyAPI separately, select a model available from its `/v1/models` endpoint, and keep its client key on the backend. The backend sends a strict JSON Schema through the OpenAI-compatible Chat Completions API, validates the response, and requires proposal confirmation before changing schedules. Model/schema support must be verified for the configured provider; protocol compatibility alone does not guarantee every structured-output feature. If the key is empty, chat returns 503 while the other APIs remain available. In deployment, the configured URL must be reachable from FastAPI; localhost refers to the machine or container running FastAPI, not the developer's computer.
 - Password reset & reminders: set `SMTP_HOST`, `SMTP_USERNAME`, and `SMTP_PASSWORD`; optional `SMTP_PORT` (default 465), `SMTP_FROM`, and `SMTP_TIMEOUT_SECONDS` (default 30). Password reset also needs `APP_FRONTEND_URL`, an HTTP(S) frontend base URL used only to build the link in the email. The backend does not call the frontend. The reset endpoint returns 503 when its required configuration is missing or the frontend URL is invalid.
 - Frontend: set `CORS_ORIGINS` to a comma-separated list of exact frontend origins. Local Vite defaults are `http://localhost:5173,http://127.0.0.1:5173`.
 
