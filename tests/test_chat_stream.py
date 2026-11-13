@@ -2,6 +2,7 @@ from io import BytesIO
 import json
 from unittest import TestCase
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from fastapi import HTTPException
 
@@ -68,3 +69,12 @@ class ChatStreamTests(TestCase):
             self.assertEqual(next(source), ("answer", "Hello"))
             source.close()
         self.assertTrue(response.closed)
+
+    def test_upstream_503_during_stream_has_safe_unavailable_status(self):
+        failure = HTTPError("http://provider.invalid/v1/chat/completions", 503,
+                            "Unavailable", {}, BytesIO(b"private provider detail"))
+        with patch("app.services.chat_ai.urlopen", side_effect=failure):
+            with self.assertRaises(HTTPException) as error:
+                list(stream_schedule_ai("Hi", [], [], "2026-11-13T09:00:00+07:00"))
+        self.assertEqual(error.exception.status_code, 503)
+        self.assertTrue(failure.fp.closed)

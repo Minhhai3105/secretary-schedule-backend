@@ -224,3 +224,17 @@ class ChatCompletionTests(DatabaseCase):
                 self.request(self.payload(stream=True), stream=True, disconnect_after=2)
         self.assertEqual(closed, [True])
         self.assertEqual(self.db.query(ChatMessage).filter_by(user_id=self.user.id).count(), 0)
+
+    def test_upstream_unavailable_is_a_typed_sse_error_without_history_or_success(self):
+        def provider(*args):
+            raise HTTPException(503, "private provider detail")
+            yield
+        with patch.dict("os.environ", {"AI_API_KEY": "test-only"}), patch(
+            "app.api.chat.stream_schedule_ai", side_effect=provider,
+        ):
+            status, body = self.request(self.payload(stream=True), stream=True)
+        self.assertEqual(status, 200)  # The SSE connection started before the provider failed.
+        self.assertIn('"code": "ai_unavailable"', body)
+        self.assertNotIn("[DONE]", body)
+        self.assertNotIn("private provider detail", body)
+        self.assertEqual(self.db.query(ChatMessage).filter_by(user_id=self.user.id).count(), 0)

@@ -132,9 +132,12 @@ def _stream_completion(payload, request: Request, user: User, db: Session) -> St
             raise ValueError("Missing completion result")
         except Exception as exc:
             logger.warning("Schedule completion stream failed: %s", type(exc).__name__)
+            unavailable = isinstance(exc, HTTPException) and exc.status_code == 503
             yield "data: " + json.dumps({"error": {
-                "message": "Schedule assistant stream failed; reload history before retrying",
-                "type": "server_error", "param": None, "code": "stream_failed",
+                "message": "Chat AI is temporarily unavailable; reload history before retrying" if unavailable
+                else "Schedule assistant stream failed; reload history before retrying",
+                "type": "server_error", "param": None,
+                "code": "ai_unavailable" if unavailable else "stream_failed",
             }}) + "\n\n"
         finally:
             await run_in_threadpool(source.close)

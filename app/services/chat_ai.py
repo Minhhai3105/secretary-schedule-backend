@@ -123,6 +123,7 @@ def _parse_output(content: str) -> dict:
 
 
 def _provider_failure(exc: Exception) -> None:
+    temporarily_unavailable = isinstance(exc, HTTPError) and exc.code in (429, 503)
     if isinstance(exc, HTTPError):
         logger.warning("Chat AI provider rejected the request: HTTP %s", exc.code)
         exc.close()
@@ -132,7 +133,10 @@ def _provider_failure(exc: Exception) -> None:
         logger.warning("Chat AI provider connection failed: %s", error_name)
     else:
         logger.warning("Chat AI provider response is invalid: %s", type(exc).__name__)
-    raise HTTPException(status_code=502, detail="Chat AI response failed") from exc
+    raise HTTPException(
+        status_code=503 if temporarily_unavailable else 502,
+        detail="Chat AI is temporarily unavailable" if temporarily_unavailable else "Chat AI response failed",
+    ) from exc
 
 
 

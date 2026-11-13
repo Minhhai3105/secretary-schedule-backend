@@ -145,3 +145,14 @@ class ChatAIContractTests(TestCase):
         self.assertNotIn("private provider error body", logged)
         self.assertNotIn("Hello", logged)
         self.assertTrue(failure.fp.closed)
+
+    def test_upstream_rate_limit_or_unavailability_returns_safe_503(self) -> None:
+        for status in (429, 503):
+            failure = HTTPError("http://provider.invalid/v1/chat/completions", status,
+                                "Unavailable", {}, BytesIO(b"private provider detail"))
+            with self.subTest(status=status), patch("app.services.chat_ai.urlopen", side_effect=failure):
+                with self.assertRaises(HTTPException) as error:
+                    ask_schedule_ai("Hi", [], [], "2026-11-13T09:00:00+07:00")
+                self.assertEqual(error.exception.status_code, 503)
+                self.assertNotIn("private", error.exception.detail)
+                self.assertTrue(failure.fp.closed)

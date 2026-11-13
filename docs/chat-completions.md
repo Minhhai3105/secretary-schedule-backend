@@ -65,6 +65,8 @@ Only the display answer is streamed while the model generates JSON. Schedules an
 
 Authentication, request validation and missing configuration fail with normal HTTP errors before streaming starts. Failures after headers are sent use a safe `data: {"error": ...}` event, without a successful stop chunk or `[DONE]`. EOF alone is not success. Provider responses are bounded to 1 MB and use `AI_TIMEOUT_SECONDS` for socket reads; the frontend aborts after 180 seconds and on component unmount. Closing the chat panel only minimizes it.
 
+Upstream HTTP 429/503 is normalized to a safe service-unavailable error. Nonstreaming clients receive HTTP 503; an already-started SSE response uses `error.code: "ai_unavailable"` within HTTP 200. The initial 200 only means the stream opened, not that model generation succeeded. Raw provider details are not exposed. Availability may recover without code changes; a 503 alone does not identify quota, capacity or account configuration as the cause.
+
 Reload history before manually retrying an interrupted request: the server may have committed just before the connection failed. No automatic message retry or schedule mutation occurs. A disconnect before completion closes the upstream generator; cleanup can wait for the current blocking socket read until its configured timeout. Streaming holds one database session per active request. Configure reverse proxies to avoid response buffering and allow the upstream read interval; periodic downstream heartbeat events are not currently implemented.
 
 Tests: `python -m unittest tests.test_chat_stream tests.test_chat_completions -v` covers upstream chunk decoding, escaped Unicode, truncation, error frames, persistence and proposal confirmation.
