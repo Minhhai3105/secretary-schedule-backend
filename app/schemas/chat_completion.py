@@ -47,7 +47,7 @@ class ChatCompletionRequest(BaseModel):
     model: str = Field(min_length=1, max_length=255)
     # Account-scoped history is loaded by the backend, not supplied by a client.
     messages: list[CompletionUserMessage] = Field(min_length=1, max_length=1)
-    stream: Literal[False] = False
+    stream: bool = False
     n: Literal[1] = 1
     response_format: CompletionResponseFormat | None = None
 
