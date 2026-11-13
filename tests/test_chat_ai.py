@@ -5,7 +5,7 @@ from http.client import IncompleteRead
 import json
 from unittest import TestCase
 from unittest.mock import patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 from fastapi import HTTPException
 
@@ -129,3 +129,19 @@ class ChatAIContractTests(TestCase):
                 with self.assertRaises(HTTPException) as error:
                     ask_schedule_ai("Hello", [], [], "2026-11-13T09:00:00+07:00")
                 self.assertEqual(error.exception.status_code, 502)
+
+    def test_provider_http_error_logs_status_without_credentials_or_body(self) -> None:
+        failure = HTTPError("http://provider.invalid/v1/chat/completions", 401,
+                            "Unauthorized", {}, BytesIO(b"private provider error body"))
+        with patch("app.services.chat_ai.urlopen", side_effect=failure), self.assertLogs(
+            "app.services.chat_ai", level="WARNING"
+        ) as logs:
+            with self.assertRaises(HTTPException) as error:
+                ask_schedule_ai("Hello", [], [], "2026-11-13T09:00:00+07:00")
+        self.assertEqual(error.exception.status_code, 502)
+        logged = " ".join(logs.output)
+        self.assertIn("HTTP 401", logged)
+        self.assertNotIn("test-provider-key", logged)
+        self.assertNotIn("private provider error body", logged)
+        self.assertNotIn("Hello", logged)
+        self.assertTrue(failure.fp.closed)

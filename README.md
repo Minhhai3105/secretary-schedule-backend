@@ -53,3 +53,16 @@ Migration `003_chat_messages.py` adds account-scoped chat history. `GET /api/cha
 - Frontend: set `CORS_ORIGINS` to a comma-separated list of exact frontend origins. Local Vite defaults are `http://localhost:5173,http://127.0.0.1:5173`.
 
 See [backend_status.md](docs/backend_status.md) for the implemented API and known limits.
+
+## Troubleshooting chat 502 on another machine
+
+Pulling code does not replace an existing `.env`. For the direct CLIProxyAPI setup, check `AI_BASE_URL=http://127.0.0.1:8317/v1`, `AI_MODEL=gemini-3.8-flash-high` (or a model listed by that server), and `AI_API_KEY` equal to that CLIProxyAPI server's client key. A previous LiteLLM URL on port 4000, its `secretary-schedule` alias, or its master key must be replaced for this setup. `127.0.0.1` refers to the machine/container running FastAPI, so CLIProxyAPI must be running there or the URL must point to a reachable server. Re-load `.env` and restart FastAPI after editing it.
+
+With the environment loaded, check the provider connection without printing the key:
+
+```sh
+curl --max-time 10 -sS -o /dev/null -w 'HTTP %{http_code}\n' \
+  -H "Authorization: Bearer $AI_API_KEY" "$AI_BASE_URL/models"
+```
+
+HTTP 200 verifies authentication to the model-list endpoint only; an actual chat request is still required to verify model availability and schema support. Connection failure means the server address/service is unavailable; HTTP 401/403 means authentication/access must be checked; HTTP 404 means the base URL/path must be checked. Provider quota/model errors may occur only on chat requests. FastAPI logs the upstream HTTP status or connection/response error class for chat failures, without logging credentials, message content, or provider error bodies. Share those diagnostic lines, not the `.env` or API key, when reporting a failure.

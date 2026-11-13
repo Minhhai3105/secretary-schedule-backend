@@ -1,4 +1,5 @@
 import json
+import logging
 from http.client import HTTPException as HTTPClientError
 from os import environ
 from urllib.error import HTTPError, URLError
@@ -6,6 +7,7 @@ from urllib.request import Request, urlopen
 
 from fastapi import HTTPException
 
+logger = logging.getLogger(__name__)
 
 SCHEDULE_FIELDS = (
     "title", "starts_at_utc", "ends_at_utc", "meeting_mode", "location",
@@ -126,4 +128,13 @@ def ask_schedule_ai(message: str, history: list[dict], schedules: list[dict], no
         return output
     except (HTTPError, URLError, TimeoutError, ConnectionError, HTTPClientError,
             ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
+        if isinstance(exc, HTTPError):
+            logger.warning("Chat AI provider rejected the request: HTTP %s", exc.code)
+            exc.close()
+        elif isinstance(exc, (URLError, TimeoutError, ConnectionError, HTTPClientError)):
+            reason = exc.reason if isinstance(exc, URLError) else exc
+            error_name = type(reason).__name__ if isinstance(reason, BaseException) else type(exc).__name__
+            logger.warning("Chat AI provider connection failed: %s", error_name)
+        else:
+            logger.warning("Chat AI provider response is invalid: %s", type(exc).__name__)
         raise HTTPException(status_code=502, detail="Chat AI response failed") from exc
