@@ -25,6 +25,7 @@ Run the PostgreSQL-backed flow tests with `DATABASE_URL` set (and `PGPASSFILE` i
 ./.venv/bin/python -m unittest tests.test_reminders -v
 ./.venv/bin/python -m unittest tests.test_password_reset -v
 ./.venv/bin/python -m unittest tests.test_chat_history -v
+./.venv/bin/python -m unittest tests.test_migrations -v
 ```
 
 Run the email reminder worker once or continuously:
@@ -40,7 +41,9 @@ You can also run one case by its full name, for example `./.venv/bin/python -m u
 
 The five pre-merge development migrations were consolidated into `001_initial_schema.py`. A fresh database uses `alembic upgrade head`. An existing development database at the former revision must have its schema checked before its revision marker is changed to `001`; this does not recreate application tables. When adding later migrations, use the current head as `down_revision`. Numbered filenames alone do not prevent conflicts when two branches create migrations in parallel.
 
-Migration `002_chat_messages.py` adds account-scoped chat history. `GET /api/chat/messages?limit=20&cursor=<message UUID>` returns newest messages first, at most 50 per page, and a `next_cursor` for older messages. `POST /api/chat/messages` now loads the five most recent turns from PostgreSQL as AI context. The legacy request `history` field remains accepted for older clients but is ignored. `PATCH /api/reminder-settings` updates only supplied settings; the existing full-replacement `PUT` remains available.
+The migration chain is `001_initial_schema.py` → `002_related_person_me.py` → `003_chat_messages.py`, with a single head `003`. Earlier branches accidentally gave both later migrations the revision `002`. Revision `003` supports both known legacy states: it creates the chat table when absent, or preserves existing chat messages and applies the `Me` default if the former chat migration already ran as `002`. A database already at `003` needs no revision change. Run `alembic upgrade head`; do not reset the database or blindly stamp a different revision to fix this mismatch. Uvicorn startup and `/health` do not run migrations or verify the database schema. Migration tests use disposable PostgreSQL schemas and require permission to create and drop those test schemas.
+
+Migration `003_chat_messages.py` adds account-scoped chat history. `GET /api/chat/messages?limit=20&cursor=<message UUID>` returns newest messages first, at most 50 per page, and a `next_cursor` for older messages. `POST /api/chat/messages` now loads the five most recent turns from PostgreSQL as AI context. The legacy request `history` field remains accepted for older clients but is ignored. `PATCH /api/reminder-settings` updates only supplied settings; the existing full-replacement `PUT` remains available.
 
 ## External services
 
