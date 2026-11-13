@@ -26,6 +26,7 @@ Run the PostgreSQL-backed flow tests with `DATABASE_URL` set (and `PGPASSFILE` i
 ./.venv/bin/python -m unittest tests.test_reminders -v
 ./.venv/bin/python -m unittest tests.test_password_reset -v
 ./.venv/bin/python -m unittest tests.test_chat_history -v
+./.venv/bin/python -m unittest tests.test_chat_completions -v
 ./.venv/bin/python -m unittest tests.test_migrations -v
 ```
 
@@ -47,6 +48,8 @@ The migration chain is `001_initial_schema.py` â†’ `002_related_person_me.py` â†
 Migration `003_chat_messages.py` adds account-scoped chat history. `GET /api/chat/messages?limit=20&cursor=<message UUID>` returns newest messages first, at most 50 per page, and a `next_cursor` for older messages. `POST /api/chat/messages` now loads the five most recent turns from PostgreSQL as AI context. The legacy request `history` field remains accepted for older clients but is ignored. `PATCH /api/reminder-settings` updates only supplied settings; the existing full-replacement `PUT` remains available.
 
 ## External services
+
+The web chat uses authenticated `POST /v1/chat/completions` with `messages`, a fixed structured response schema, and the standard `choices[].message.content` envelope. See [chat-completions.md](docs/chat-completions.md) for the supported subset, example requests, error handling, and frontend schema snapshot.
 
 - Chat: FastAPI calls CLIProxyAPI directly at `AI_BASE_URL` (default `http://127.0.0.1:8317/v1`) using `AI_API_KEY` (the CLIProxyAPI client key), `AI_MODEL` (default `gemini-3.8-flash-high`), and `AI_TIMEOUT_SECONDS` (default 120). LiteLLM is not required. Start and authenticate CLIProxyAPI separately, select a model available from its `/v1/models` endpoint, and keep its client key on the backend. The backend sends a strict JSON Schema through the OpenAI-compatible Chat Completions API, validates the response, and requires proposal confirmation before changing schedules. Model/schema support must be verified for the configured provider; protocol compatibility alone does not guarantee every structured-output feature. If the key is empty, chat returns 503 while the other APIs remain available. In deployment, the configured URL must be reachable from FastAPI; localhost refers to the machine or container running FastAPI, not the developer's computer.
 - Password reset & reminders: set `SMTP_HOST`, `SMTP_USERNAME`, and `SMTP_PASSWORD`; optional `SMTP_PORT` (default 465), `SMTP_FROM`, and `SMTP_TIMEOUT_SECONDS` (default 30). Password reset also needs `APP_FRONTEND_URL`, an HTTP(S) frontend base URL used only to build the link in the email. The backend does not call the frontend. The reset endpoint returns 503 when its required configuration is missing or the frontend URL is invalid.
