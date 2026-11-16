@@ -4,6 +4,8 @@ FastAPI + PostgreSQL backend for a multi-user schedule assistant. The database u
 
 ## Local setup
 
+For a separate PostgreSQL database and FastAPI in Docker, see [Docker setup](docs/docker.md). This keeps the Python 3.14 / PostgreSQL 18 versions used below.
+
 Use Python 3.14 and PostgreSQL 18. Install the pinned packages in `requirements.txt` in a virtual environment. Set `DATABASE_URL` to a PostgreSQL URL for a database owned by the application role; set `PGPASSFILE` if using a password file. Set a random `JWT_SECRET` of at least 32 characters. Never commit these values.
 
 Copy `.env.example` to `.env` and replace the placeholders. The app reads environment variables; it does not load `.env` automatically. In a local shell, run `set -a; . ./.env; set +a` before the commands below. Keep `.env` untracked.
