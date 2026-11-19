@@ -2,7 +2,7 @@ from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -21,6 +21,7 @@ from app.services.mailer import send_email_message
 VIETNAM_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 MAX_ATTEMPTS = 4
 DEFAULT_RETRY_DELAY = timedelta(minutes=5)
+DEFAULT_BATCH_SIZE = 10
 UPDATE_LOOKBACK = timedelta(hours=24)
 
 SendEmailFn = Callable[..., None]
@@ -89,6 +90,13 @@ def _enqueue_delivery(
     applicable_date_vietnam: date | None,
     due_at_utc: datetime,
 ) -> EmailDelivery | None:
+    # Fast MVCC check avoids triggering PostgreSQL ON CONFLICT transactionid waits
+    # when another worker is currently updating this already-committed delivery.
+    existing_id = db.scalar(
+        select(EmailDelivery.id).where(EmailDelivery.event_key == event_key)
+    )
+    if existing_id is not None:
+        return None
     stmt = (
         pg_insert(EmailDelivery)
         .values(
@@ -325,37 +333,95 @@ def _compose_delivery_email(
     return subject, body, html_body
 
 
+def _claim_next_due_delivery(
+    db: Session,
+    *,
+    now: datetime,
+    retry_delay: timedelta,
+    exclude_ids: set[object],
+) -> EmailDelivery | None:
+    attempt_count = (
+        select(func.count(EmailAttempt.id))
+        .where(EmailAttempt.delivery_id == EmailDelivery.id)
+        .correlate(EmailDelivery)
+        .scalar_subquery()
+    )
+    latest_attempt_time = (
+        select(
+            func.max(
+                func.coalesce(
+                    EmailAttempt.finished_at_utc,
+                    EmailAttempt.started_at_utc,
+                )
+            )
+        )
+        .where(EmailAttempt.delivery_id == EmailDelivery.id)
+        .correlate(EmailDelivery)
+        .scalar_subquery()
+    )
+    stmt = (
+        select(EmailDelivery)
+        .where(
+            EmailDelivery.due_at_utc <= now,
+            EmailDelivery.status.in_(("pending", "failed")),
+            attempt_count < MAX_ATTEMPTS,
+            or_(
+                EmailDelivery.status != "failed",
+                latest_attempt_time.is_(None),
+                latest_attempt_time <= now - retry_delay,
+            ),
+        )
+        .order_by(EmailDelivery.due_at_utc, EmailDelivery.id)
+        .with_for_update(skip_locked=True, of=EmailDelivery)
+        .limit(1)
+    )
+    if exclude_ids:
+        stmt = stmt.where(EmailDelivery.id.notin_(exclude_ids))
+    return db.scalar(stmt)
+
+
 def process_due_deliveries(
     db: Session,
     *,
     now_utc: datetime | None = None,
     retry_delay: timedelta = DEFAULT_RETRY_DELAY,
     send_fn: SendEmailFn = send_email_message,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    commit_each: bool = False,
 ) -> list[EmailDelivery]:
-    now = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    candidates = db.scalars(
-        select(EmailDelivery)
-        .where(
-            EmailDelivery.due_at_utc <= now,
-            EmailDelivery.status.in_(("pending", "failed")),
-        )
-        .order_by(EmailDelivery.due_at_utc, EmailDelivery.id)
-        .with_for_update(skip_locked=True)
-    ).all()
+    if batch_size <= 0:
+        return []
 
+    now = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
     processed: list[EmailDelivery] = []
-    for delivery in candidates:
+    seen_ids: set[object] = set()
+
+    for _ in range(batch_size):
+        delivery = _claim_next_due_delivery(
+            db,
+            now=now,
+            retry_delay=retry_delay,
+            exclude_ids=seen_ids,
+        )
+        if delivery is None:
+            break
+        seen_ids.add(delivery.id)
+
         attempts = db.scalars(
             select(EmailAttempt)
             .where(EmailAttempt.delivery_id == delivery.id)
             .order_by(EmailAttempt.attempt_number)
         ).all()
         if len(attempts) >= MAX_ATTEMPTS:
+            if commit_each:
+                db.commit()
             continue
 
         if delivery.status == "failed" and attempts:
             last_time = attempts[-1].finished_at_utc or attempts[-1].started_at_utc
             if now < last_time + retry_delay:
+                if commit_each:
+                    db.commit()
                 continue
 
         if delivery.kind in ("near", "update"):
@@ -378,12 +444,17 @@ def process_due_deliveries(
             if is_stale:
                 delivery.status = "cancelled"
                 db.flush()
+                if commit_each:
+                    db.commit()
                 processed.append(delivery)
                 continue
 
         user = db.get(User, delivery.user_id)
         if user is None:
             delivery.status = "cancelled"
+            db.flush()
+            if commit_each:
+                db.commit()
             processed.append(delivery)
             continue
 
@@ -428,6 +499,8 @@ def process_due_deliveries(
             delivery.status = "failed"
 
         db.flush()
+        if commit_each:
+            db.commit()
         processed.append(delivery)
 
     return processed
@@ -439,13 +512,15 @@ def run_reminder_cycle(
     now_utc: datetime | None = None,
     retry_delay: timedelta = DEFAULT_RETRY_DELAY,
     send_fn: SendEmailFn = send_email_message,
+    batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> list[EmailDelivery]:
     enqueue_due_reminders(db, now_utc=now_utc)
-    processed = process_due_deliveries(
+    db.commit()
+    return process_due_deliveries(
         db,
         now_utc=now_utc,
         retry_delay=retry_delay,
         send_fn=send_fn,
+        batch_size=batch_size,
+        commit_each=True,
     )
-    db.commit()
-    return processed

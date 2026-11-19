@@ -3,7 +3,23 @@
 from html import escape
 
 
-def _base_email_shell(*, header_title: str, content_html: str, subtitle: str = "Secretary Schedule") -> str:
+DEFAULT_REMINDER_FOOTER = (
+    "Email được gửi tự động từ <strong>Secretary Schedule</strong> theo cài đặt nhắc việc của bạn.<br>"
+    "Thời gian hiển thị theo múi giờ Việt Nam (Asia/Ho_Chi_Minh, UTC+7)."
+)
+ACCOUNT_SECURITY_FOOTER = (
+    "Email bảo mật được gửi tự động từ <strong>Secretary Schedule</strong> "
+    "theo yêu cầu tài khoản của bạn."
+)
+
+
+def _base_email_shell(
+    *,
+    header_title: str,
+    content_html: str,
+    subtitle: str = "Secretary Schedule",
+    footer_html: str = DEFAULT_REMINDER_FOOTER,
+) -> str:
     """Wrap content in a responsive, modern HTML email card."""
     return f"""<!DOCTYPE html>
 <html lang="vi">
@@ -33,8 +49,7 @@ def _base_email_shell(*, header_title: str, content_html: str, subtitle: str = "
           <!-- Footer -->
           <tr>
             <td style="background-color: #f1f5f9; padding: 18px 28px; border-top: 1px solid #e2e8f0; font-size: 12px; color: #64748b; text-align: center; line-height: 1.5;">
-              Email được gửi tự động từ <strong>Secretary Schedule</strong> theo cài đặt nhắc việc của bạn.<br>
-              Thời gian hiển thị theo múi giờ Việt Nam (Asia/Ho_Chi_Minh, UTC+7).
+              {footer_html}
             </td>
           </tr>
         </table>
@@ -251,4 +266,8 @@ def render_password_reset_html(*, reset_url: str) -> str:
         Nếu bạn không yêu cầu đặt lại mật khẩu, bạn có thể yên tâm bỏ qua email này.
       </p>
     """
-    return _base_email_shell(header_title="Đặt lại mật khẩu", content_html=content)
+    return _base_email_shell(
+        header_title="Đặt lại mật khẩu",
+        content_html=content,
+        footer_html=ACCOUNT_SECURITY_FOOTER,
+    )

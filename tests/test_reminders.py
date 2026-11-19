@@ -30,6 +30,7 @@ from app.services.reminders import (
     MAX_ATTEMPTS,
     enqueue_due_reminders,
     process_due_deliveries,
+    run_reminder_cycle,
 )
 from tests._db_case import DatabaseCase
 
@@ -497,6 +498,8 @@ class ReminderWorkerTests(DatabaseCase):
         )
         self.assertNotIn("\"onclick=", html_reset)
         self.assertIn("&quot;onclick=", html_reset)
+        self.assertNotIn("cài đặt nhắc việc", html_reset)
+        self.assertIn("Email bảo mật", html_reset)
 
     def test_send_fn_type_error_fails_attempt_without_duplicate_call(self) -> None:
         now = self._relative_morning_utc()
@@ -530,7 +533,74 @@ class ReminderWorkerTests(DatabaseCase):
         self.assertEqual(attempt.status, "failed")
         self.assertIn("TypeError", attempt.error_message or "")
 
-    def test_concurrent_workers_enqueue_and_process_without_conflict_or_duplicate(
+    def test_batch_size_limits_cycle_and_skips_exhausted_failed_deliveries(self) -> None:
+        now = self._relative_morning_utc()
+        # Create an earlier failed delivery that already reached MAX_ATTEMPTS
+        exhausted = EmailDelivery(
+            user_id=self.user.id,
+            schedule_id=None,
+            event_key=f"daily:{self.user.id}:exhausted",
+            kind="daily",
+            applicable_date_vietnam=now.astimezone(VIETNAM_TZ).date(),
+            due_at_utc=now - timedelta(hours=2),
+            status="failed",
+        )
+        self.db.add(exhausted)
+        self.db.flush()
+        for num in range(1, MAX_ATTEMPTS + 1):
+            self.db.add(
+                EmailAttempt(
+                    delivery_id=exhausted.id,
+                    attempt_number=num,
+                    status="failed",
+                    started_at_utc=now - timedelta(hours=1),
+                    finished_at_utc=now - timedelta(hours=1),
+                    error_message="ConnectionError: failed",
+                )
+            )
+
+        create_schedule(
+            ScheduleCreate(
+                title="Batch meeting",
+                starts_at_utc=now + timedelta(minutes=20),
+                meeting_mode="online",
+                meeting_url="https://meet.example.com/batch",
+            ),
+            self.user,
+            self.db,
+        )
+        created = enqueue_due_reminders(self.db, now_utc=now)
+        self.assertEqual(len(created), 2)
+
+        sent_subjects: list[str] = []
+
+        def record_send(
+            *, to_email: str, subject: str, body: str, html_body: str | None = None
+        ) -> None:
+            sent_subjects.append(subject)
+
+        # batch_size=1 must skip the exhausted delivery and send 1 fresh eligible email
+        first_batch = process_due_deliveries(
+            self.db,
+            now_utc=now,
+            retry_delay=timedelta(0),
+            send_fn=record_send,
+            batch_size=1,
+        )
+        self.assertEqual(len(first_batch), 1)
+        self.assertEqual(len(sent_subjects), 1)
+
+        second_batch = process_due_deliveries(
+            self.db,
+            now_utc=now,
+            retry_delay=timedelta(0),
+            send_fn=record_send,
+            batch_size=1,
+        )
+        self.assertEqual(len(second_batch), 1)
+        self.assertEqual(len(sent_subjects), 2)
+
+    def test_concurrent_run_reminder_cycles_do_not_block_enqueue_or_hog_other_deliveries(
         self,
     ) -> None:
         schema = "test_reminders_conc_" + uuid4().hex
@@ -577,13 +647,115 @@ class ReminderWorkerTests(DatabaseCase):
                 )
                 seed_db.commit()
 
-            # 1) Two workers enqueue concurrently: neither raises IntegrityError
+            # Worker A runs full run_reminder_cycle(): enqueues BOTH due emails (daily + near),
+            # commits enqueue, then pauses inside SMTP while sending the first email.
+            # Worker B runs full run_reminder_cycle() concurrently while Worker A is still in SMTP:
+            # - Worker B must NOT block at enqueue on Worker A's transactionid.
+            # - Worker B must immediately claim and send the second independent email.
+            worker1_in_smtp = threading.Event()
+            release_worker1 = threading.Event()
+            lock = threading.Lock()
+            w1_sent: list[str] = []
+            w2_sent: list[str] = []
+            worker_errors: list[Exception] = []
+
+            def slow_send(
+                *, to_email: str, subject: str, body: str, html_body: str | None = None
+            ) -> None:
+                worker1_in_smtp.set()
+                release_worker1.wait(timeout=5)
+                with lock:
+                    w1_sent.append(subject)
+
+            def fast_send(
+                *, to_email: str, subject: str, body: str, html_body: str | None = None
+            ) -> None:
+                with lock:
+                    w2_sent.append(subject)
+
+            def run_worker1() -> None:
+                try:
+                    with Session(schema_engine) as w1_db:
+                        run_reminder_cycle(
+                            w1_db,
+                            now_utc=now,
+                            retry_delay=timedelta(0),
+                            send_fn=slow_send,
+                        )
+                except Exception as exc:
+                    with lock:
+                        worker_errors.append(exc)
+
+            worker2_done = threading.Event()
+            w2_processed_count: list[int] = []
+
+            def run_worker2() -> None:
+                try:
+                    with Session(schema_engine) as w2_db:
+                        processed = run_reminder_cycle(
+                            w2_db,
+                            now_utc=now,
+                            retry_delay=timedelta(0),
+                            send_fn=fast_send,
+                        )
+                        with lock:
+                            w2_processed_count.append(len(processed))
+                except Exception as exc:
+                    with lock:
+                        worker_errors.append(exc)
+                finally:
+                    worker2_done.set()
+
+            p1 = threading.Thread(target=run_worker1)
+            p1.start()
+            self.assertTrue(worker1_in_smtp.wait(timeout=5))
+
+            try:
+                p2 = threading.Thread(target=run_worker2)
+                p2.start()
+                # Worker B must finish its entire cycle (enqueue + sending email #2)
+                # BEFORE Worker A is released from SMTP!
+                self.assertTrue(
+                    worker2_done.wait(timeout=5),
+                    "Worker B was blocked while Worker A was sending SMTP",
+                )
+                p2.join(timeout=5)
+                self.assertEqual(w2_processed_count, [1])
+                self.assertEqual(len(w2_sent), 1)
+            finally:
+                release_worker1.set()
+                p1.join(timeout=10)
+
+            self.assertEqual(worker_errors, [])
+            self.assertEqual(len(w1_sent), 1)
+            self.assertEqual(len(w2_sent), 1)
+            self.assertEqual(len(set(w1_sent + w2_sent)), 2)
+
+            with Session(schema_engine) as check_db:
+                deliveries = check_db.scalars(select(EmailDelivery)).all()
+                self.assertEqual(len(deliveries), 2)
+                self.assertTrue(all(item.status == "sent" for item in deliveries))
+
+            # Also verify two simultaneous enqueue calls on a brand-new schedule
+            # never raise IntegrityError.
+            with Session(schema_engine) as seed_db:
+                seed_db.add(
+                    Schedule(
+                        user_id=user_id,
+                        title="Simultaneous Enqueue Check",
+                        starts_at_utc=now + timedelta(minutes=20),
+                        meeting_mode="offline",
+                        location="Room B",
+                        related_person="Me",
+                    )
+                )
+                seed_db.commit()
+
             barrier = threading.Barrier(2)
             enqueue_counts: list[int] = []
             enqueue_errors: list[Exception] = []
-            lock = threading.Lock()
 
-            def worker_enqueue() -> None:
+            def concurrent_enqueue() -> None:
                 try:
                     with Session(schema_engine) as worker_db:
                         barrier.wait(timeout=5)
@@ -595,75 +767,15 @@ class ReminderWorkerTests(DatabaseCase):
                     with lock:
                         enqueue_errors.append(exc)
 
-            t1 = threading.Thread(target=worker_enqueue)
-            t2 = threading.Thread(target=worker_enqueue)
+            t1 = threading.Thread(target=concurrent_enqueue)
+            t2 = threading.Thread(target=concurrent_enqueue)
             t1.start()
             t2.start()
             t1.join(timeout=10)
             t2.join(timeout=10)
 
             self.assertEqual(enqueue_errors, [])
-            self.assertEqual(sum(enqueue_counts), 2)
-
-            with Session(schema_engine) as check_db:
-                total_rows = len(check_db.scalars(select(EmailDelivery)).all())
-                self.assertEqual(total_rows, 2)
-
-            # 2) Two workers process concurrently with SKIP LOCKED: zero duplicates
-            worker1_locked = threading.Event()
-            release_worker1 = threading.Event()
-            sent_subjects: list[str] = []
-            process_errors: list[Exception] = []
-
-            def slow_send(
-                *, to_email: str, subject: str, body: str, html_body: str | None = None
-            ) -> None:
-                worker1_locked.set()
-                release_worker1.wait(timeout=5)
-                with lock:
-                    sent_subjects.append(subject)
-
-            def fast_send(
-                *, to_email: str, subject: str, body: str, html_body: str | None = None
-            ) -> None:
-                with lock:
-                    sent_subjects.append(subject)
-
-            def run_worker1() -> None:
-                try:
-                    with Session(schema_engine) as w1_db:
-                        process_due_deliveries(
-                            w1_db,
-                            now_utc=now,
-                            retry_delay=timedelta(0),
-                            send_fn=slow_send,
-                        )
-                        w1_db.commit()
-                except Exception as exc:
-                    with lock:
-                        process_errors.append(exc)
-
-            p1 = threading.Thread(target=run_worker1)
-            p1.start()
-            self.assertTrue(worker1_locked.wait(timeout=5))
-
-            try:
-                with Session(schema_engine) as w2_db:
-                    w2_processed = process_due_deliveries(
-                        w2_db,
-                        now_utc=now,
-                        retry_delay=timedelta(0),
-                        send_fn=fast_send,
-                    )
-                    w2_db.commit()
-                # Worker 1 already locked all due deliveries; Worker 2 skips without blocking
-                self.assertEqual(len(w2_processed), 0)
-            finally:
-                release_worker1.set()
-                p1.join(timeout=10)
-
-            self.assertEqual(process_errors, [])
-            self.assertEqual(len(sent_subjects), 2)
+            self.assertEqual(sum(enqueue_counts), 1)
         finally:
             schema_engine.dispose()
             with engine.begin() as conn:
