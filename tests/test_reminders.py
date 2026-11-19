@@ -1,64 +1,29 @@
-"""PostgreSQL-backed email reminder worker and retry tests."""
+"""PostgreSQL-backed tests for sending and retrying email reminders."""
 
-from datetime import datetime, time, timedelta, timezone
-from os import environ
-import threading
-from unittest.mock import MagicMock, patch
-from uuid import uuid4
-from zoneinfo import ZoneInfo
+from datetime import timedelta
 
-from sqlalchemy import create_engine, select, text
-from sqlalchemy.engine import make_url
-from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from app.api.email_deliveries import get_email_delivery, list_email_deliveries
-from app.api.schedules import cancel_schedule, create_schedule, update_schedule
-from app.db.base import Base
-from app.db.session import engine
+from app.api.schedules import create_schedule
 from app.models.email_attempt import EmailAttempt
 from app.models.email_delivery import EmailDelivery
-from app.models.reminder_setting import ReminderSetting
-from app.models.schedule import Schedule
-from app.models.user import User
-from app.schemas.schedule import ScheduleCancel, ScheduleCreate, ScheduleUpdate
-from app.services.mailer import (
-    password_reset_mail_configured,
-    send_email_message,
-    smtp_configured,
-)
+from app.schemas.schedule import ScheduleCreate
 from app.services.reminders import (
     MAX_ATTEMPTS,
     enqueue_due_reminders,
     process_due_deliveries,
-    run_reminder_cycle,
 )
-from tests._db_case import DatabaseCase
+from tests._reminder_case import (
+    ReminderDatabaseCase,
+    VIETNAM_TZ,
+    relative_morning_utc,
+)
 
-VIETNAM_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
-
-class ReminderWorkerTests(DatabaseCase):
-    def setUp(self) -> None:
-        super().setUp()
-        self.settings = ReminderSetting(
-            user_id=self.user.id,
-            daily_enabled=True,
-            daily_time_vietnam=time(7, 0),
-            near_enabled=True,
-            lead_minutes=30,
-        )
-        self.db.add(self.settings)
-        self.db.flush()
-
-    @staticmethod
-    def _relative_morning_utc() -> datetime:
-        target_date = datetime.now(VIETNAM_TZ).date() + timedelta(days=1)
-        return datetime.combine(
-            target_date, time(8, 0), tzinfo=VIETNAM_TZ
-        ).astimezone(timezone.utc)
-
+class ReminderWorkerTests(ReminderDatabaseCase):
     def test_daily_and_near_reminders_enqueued_and_sent_once(self) -> None:
-        now = self._relative_morning_utc()
+        now = relative_morning_utc()
         schedule = create_schedule(
             ScheduleCreate(
                 title="Morning briefing",
@@ -108,7 +73,7 @@ class ReminderWorkerTests(DatabaseCase):
         self.assertEqual(near_item.schedule_id, schedule.id)
 
     def test_failed_delivery_retries_up_to_four_attempts_and_records_reason(self) -> None:
-        now = self._relative_morning_utc()
+        now = relative_morning_utc()
         self.settings.near_enabled = False
         self.db.flush()
 
@@ -142,269 +107,8 @@ class ReminderWorkerTests(DatabaseCase):
             detail.attempts[-1].error_message or "",
         )
 
-    def test_cancelled_or_updated_schedule_cancels_stale_near_and_enqueues_update(
-        self,
-    ) -> None:
-        now = datetime.now(timezone.utc)
-        self.settings.daily_enabled = False
-        self.db.flush()
-
-        schedule = create_schedule(
-            ScheduleCreate(
-                title="Partner sync",
-                starts_at_utc=now + timedelta(minutes=15),
-                meeting_mode="offline",
-                location="Room 302",
-            ),
-            self.user,
-            self.db,
-        )
-        enqueue_due_reminders(self.db, now_utc=now)
-
-        update_schedule(
-            schedule.id,
-            ScheduleUpdate(version=1, title="Partner sync (rescheduled)"),
-            self.user,
-            self.db,
-        )
-        cancel_schedule(
-            schedule.id,
-            ScheduleCancel(version=2),
-            self.user,
-            self.db,
-        )
-
-        enqueue_due_reminders(self.db, now_utc=now)
-        deliveries = self.db.scalars(
-            select(EmailDelivery)
-            .where(EmailDelivery.user_id == self.user.id)
-            .order_by(EmailDelivery.kind)
-        ).all()
-        by_kind = {item.kind: item for item in deliveries}
-        self.assertEqual(by_kind["near"].status, "cancelled")
-        self.assertEqual(by_kind["update"].status, "pending")
-        self.assertEqual(by_kind["update"].schedule_id, schedule.id)
-
-    def test_consecutive_updates_v1_v2_v3_only_send_v3_notification(self) -> None:
-        now = datetime.now(timezone.utc)
-        self.settings.daily_enabled = False
-        self.settings.near_enabled = True
-        self.db.flush()
-
-        # 1) Update v1 -> v2 -> v3 before worker runs at all: only v3 is enqueued and sent
-        schedule_fast = create_schedule(
-            ScheduleCreate(
-                title="Quick sync v1",
-                starts_at_utc=now + timedelta(hours=4),
-                meeting_mode="online",
-                meeting_url="https://meet.example.com/quick",
-            ),
-            self.user,
-            self.db,
-        )
-        update_schedule(
-            schedule_fast.id,
-            ScheduleUpdate(version=1, title="Quick sync v2"),
-            self.user,
-            self.db,
-        )
-        update_schedule(
-            schedule_fast.id,
-            ScheduleUpdate(version=2, title="Quick sync v3"),
-            self.user,
-            self.db,
-        )
-
-        fast_sent: list[str] = []
-        enqueue_due_reminders(self.db, now_utc=now)
-        process_due_deliveries(
-            self.db,
-            now_utc=now,
-            retry_delay=timedelta(0),
-            send_fn=lambda **kw: fast_sent.append(kw["subject"]),
-        )
-        fast_updates = self.db.scalars(
-            select(EmailDelivery).where(
-                EmailDelivery.schedule_id == schedule_fast.id,
-                EmailDelivery.kind == "update",
-            )
-        ).all()
-        self.assertEqual([d.event_key for d in fast_updates], [f"update:{schedule_fast.id}:v3"])
-        self.assertEqual(fast_updates[0].status, "sent")
-        self.assertEqual(len(fast_sent), 1)
-        self.assertIn("Quick sync v3", fast_sent[0])
-
-        # 2) Existing pending/failed v2 update is cancelled when schedule advances to v3,
-        # and version is re-verified immediately before sending
-        schedule = create_schedule(
-            ScheduleCreate(
-                title="Roadmap review v1",
-                starts_at_utc=now + timedelta(hours=3),
-                meeting_mode="online",
-                meeting_url="https://meet.example.com/roadmap",
-            ),
-            self.user,
-            self.db,
-        )
-        update_schedule(
-            schedule.id,
-            ScheduleUpdate(version=1, title="Roadmap review v2"),
-            self.user,
-            self.db,
-        )
-        enqueue_due_reminders(self.db, now_utc=now)
-
-        def fail_once(
-            *, to_email: str, subject: str, body: str, html_body: str | None = None
-        ) -> None:
-            raise ConnectionError("Temporary SMTP failure on v2")
-
-        process_due_deliveries(
-            self.db,
-            now_utc=now,
-            retry_delay=timedelta(0),
-            send_fn=fail_once,
-        )
-
-        update_schedule(
-            schedule.id,
-            ScheduleUpdate(version=2, title="Roadmap review v3"),
-            self.user,
-            self.db,
-        )
-
-        sent_subjects: list[str] = []
-
-        def record_send(
-            *, to_email: str, subject: str, body: str, html_body: str | None = None
-        ) -> None:
-            sent_subjects.append(subject)
-
-        enqueue_due_reminders(self.db, now_utc=now + timedelta(minutes=1))
-        process_due_deliveries(
-            self.db,
-            now_utc=now + timedelta(minutes=1),
-            retry_delay=timedelta(0),
-            send_fn=record_send,
-        )
-
-        update_deliveries = self.db.scalars(
-            select(EmailDelivery)
-            .where(
-                EmailDelivery.schedule_id == schedule.id,
-                EmailDelivery.kind == "update",
-            )
-            .order_by(EmailDelivery.event_key)
-        ).all()
-        by_key = {item.event_key: item.status for item in update_deliveries}
-        self.assertEqual(by_key[f"update:{schedule.id}:v2"], "cancelled")
-        self.assertEqual(by_key[f"update:{schedule.id}:v3"], "sent")
-        self.assertEqual(len(sent_subjects), 1)
-        self.assertIn("Roadmap review v3", sent_subjects[0])
-
-        # 3) Version check right before sending in process_due_deliveries cancels stale pending delivery
-        stale_pending = EmailDelivery(
-            user_id=self.user.id,
-            schedule_id=schedule.id,
-            event_key=f"update:{schedule.id}:v2-stale-direct",
-            kind="update",
-            applicable_date_vietnam=now.astimezone(VIETNAM_TZ).date(),
-            due_at_utc=now,
-            status="pending",
-        )
-        self.db.add(stale_pending)
-        self.db.flush()
-        process_due_deliveries(
-            self.db,
-            now_utc=now + timedelta(minutes=2),
-            retry_delay=timedelta(0),
-            send_fn=record_send,
-        )
-        self.db.refresh(stale_pending)
-        self.assertEqual(stale_pending.status, "cancelled")
-        self.assertEqual(len(sent_subjects), 1)
-
-    def test_mailer_supports_ssl_465_and_starttls_587_configuration(self) -> None:
-        ssl_env = {
-            "SMTP_HOST": "smtp.example.com",
-            "SMTP_PORT": "465",
-            "SMTP_USERNAME": "bot@example.com",
-            "SMTP_PASSWORD": "secret-password",
-            "APP_FRONTEND_URL": "http://localhost:5173",
-        }
-        with patch.dict("os.environ", ssl_env, clear=False), patch(
-            "app.services.mailer.smtplib.SMTP_SSL"
-        ) as mock_smtp_ssl_cls:
-            ssl_instance = MagicMock()
-            mock_smtp_ssl_cls.return_value.__enter__.return_value = ssl_instance
-            self.assertTrue(smtp_configured())
-            self.assertTrue(password_reset_mail_configured())
-            send_email_message(
-                to_email="recipient@example.com",
-                subject="Test SSL Reminder",
-                body="SSL Reminder body",
-            )
-            mock_smtp_ssl_cls.assert_called_once()
-            ssl_instance.login.assert_called_once_with(
-                "bot@example.com", "secret-password"
-            )
-            ssl_instance.send_message.assert_called_once()
-
-        starttls_env = {
-            "SMTP_HOST": "smtp.example.com",
-            "SMTP_PORT": "587",
-            "SMTP_USERNAME": "bot@example.com",
-            "SMTP_PASSWORD": "secret-password",
-            "APP_FRONTEND_URL": "http://localhost:5173",
-        }
-        with patch.dict("os.environ", starttls_env, clear=False), patch(
-            "app.services.mailer.smtplib.SMTP"
-        ) as mock_smtp_cls:
-            smtp_instance = MagicMock()
-            mock_smtp_cls.return_value.__enter__.return_value = smtp_instance
-            self.assertTrue(smtp_configured())
-            self.assertTrue(password_reset_mail_configured())
-            send_email_message(
-                to_email="recipient@example.com",
-                subject="Test STARTTLS Reminder",
-                body="STARTTLS Reminder body",
-            )
-            smtp_instance.starttls.assert_called_once()
-            smtp_instance.login.assert_called_once_with(
-                "bot@example.com", "secret-password"
-            )
-            smtp_instance.send_message.assert_called_once()
-
-    def test_mailer_delivers_multipart_alternative_with_html_body(self) -> None:
-        ssl_env = {
-            "SMTP_HOST": "smtp.example.com",
-            "SMTP_PORT": "465",
-            "SMTP_USERNAME": "bot@example.com",
-            "SMTP_PASSWORD": "secret-password",
-        }
-        with patch.dict("os.environ", ssl_env, clear=False), patch(
-            "app.services.mailer.smtplib.SMTP_SSL"
-        ) as mock_smtp_ssl_cls:
-            ssl_instance = MagicMock()
-            mock_smtp_ssl_cls.return_value.__enter__.return_value = ssl_instance
-            send_email_message(
-                to_email="user@example.com",
-                subject="Test HTML Reminder",
-                body="Plain text reminder",
-                html_body="<p>HTML formatted reminder</p>",
-            )
-            self.assertEqual(ssl_instance.send_message.call_count, 1)
-            msg = ssl_instance.send_message.call_args[0][0]
-            self.assertTrue(msg.is_multipart())
-            payloads = msg.get_payload()
-            self.assertEqual(len(payloads), 2)
-            self.assertEqual(payloads[0].get_content_type(), "text/plain")
-            self.assertIn("Plain text reminder", payloads[0].get_payload())
-            self.assertEqual(payloads[1].get_content_type(), "text/html")
-            self.assertIn("<p>HTML formatted reminder</p>", payloads[1].get_payload())
-
     def test_deliveries_send_both_plain_text_and_html_body(self) -> None:
-        now = self._relative_morning_utc()
+        now = relative_morning_utc()
         schedule = create_schedule(
             ScheduleCreate(
                 title="Sprint Planning & Review",
@@ -447,62 +151,8 @@ class ReminderWorkerTests(DatabaseCase):
         self.assertIn("Review backlog tickets", near_item["html"])
         self.assertIn("Bring story point estimates", near_item["html"])
 
-    def test_email_templates_escape_html_against_xss(self) -> None:
-        from app.services.email_template import (
-            render_daily_summary_html,
-            render_near_reminder_html,
-            render_password_reset_html,
-            render_update_notification_html,
-        )
-
-        xss_payload = "<script>alert('xss')</script>"
-        html_near = render_near_reminder_html(
-            title=xss_payload,
-            starts_at="2026-11-12 10:00",
-            ends_at=None,
-            meeting_mode="offline",
-            related_person=xss_payload,
-            location=xss_payload,
-            preparation=xss_payload,
-            notes=xss_payload,
-        )
-        self.assertNotIn("<script>", html_near)
-        self.assertIn("&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;", html_near)
-
-        html_daily = render_daily_summary_html(
-            date_str="2026-11-12",
-            schedules=[{
-                "title": xss_payload,
-                "time_range": "10:00 - 11:00",
-                "mode": "offline",
-                "related_person": xss_payload,
-            }],
-        )
-        self.assertNotIn("<script>", html_daily)
-        self.assertIn("&lt;script&gt;", html_daily)
-
-        html_update = render_update_notification_html(
-            title=xss_payload,
-            version=2,
-            starts_at="10:00",
-            ends_at="11:00",
-            meeting_mode="offline",
-            related_person=xss_payload,
-            is_cancelled=False,
-        )
-        self.assertNotIn("<script>", html_update)
-        self.assertIn("&lt;script&gt;", html_update)
-
-        html_reset = render_password_reset_html(
-            reset_url="http://localhost:5173/reset-password?token=123\"onclick=\"alert(1)"
-        )
-        self.assertNotIn("\"onclick=", html_reset)
-        self.assertIn("&quot;onclick=", html_reset)
-        self.assertNotIn("cài đặt nhắc việc", html_reset)
-        self.assertIn("Email bảo mật", html_reset)
-
     def test_send_fn_type_error_fails_attempt_without_duplicate_call(self) -> None:
-        now = self._relative_morning_utc()
+        now = relative_morning_utc()
         self.settings.near_enabled = False
         self.db.flush()
         enqueue_due_reminders(self.db, now_utc=now)
@@ -534,7 +184,7 @@ class ReminderWorkerTests(DatabaseCase):
         self.assertIn("TypeError", attempt.error_message or "")
 
     def test_batch_size_limits_cycle_and_skips_exhausted_failed_deliveries(self) -> None:
-        now = self._relative_morning_utc()
+        now = relative_morning_utc()
         # Create an earlier failed delivery that already reached MAX_ATTEMPTS
         exhausted = EmailDelivery(
             user_id=self.user.id,
@@ -599,185 +249,3 @@ class ReminderWorkerTests(DatabaseCase):
         )
         self.assertEqual(len(second_batch), 1)
         self.assertEqual(len(sent_subjects), 2)
-
-    def test_concurrent_run_reminder_cycles_do_not_block_enqueue_or_hog_other_deliveries(
-        self,
-    ) -> None:
-        schema = "test_reminders_conc_" + uuid4().hex
-        with engine.begin() as conn:
-            conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-
-        schema_url = make_url(environ["DATABASE_URL"]).update_query_dict({
-            "options": "-csearch_path=" + schema,
-        })
-        schema_engine = create_engine(schema_url)
-        try:
-            Base.metadata.create_all(schema_engine)
-            now = self._relative_morning_utc()
-            user_id = uuid4()
-
-            with Session(schema_engine) as seed_db:
-                seed_db.add(
-                    User(
-                        id=user_id,
-                        name="Concurrent Worker User",
-                        email=f"conc-{uuid4().hex}@example.invalid",
-                        password_hash="test-only",
-                    )
-                )
-                seed_db.flush()
-                seed_db.add(
-                    ReminderSetting(
-                        user_id=user_id,
-                        daily_enabled=True,
-                        daily_time_vietnam=time(7, 0),
-                        near_enabled=True,
-                        lead_minutes=30,
-                    )
-                )
-                seed_db.add(
-                    Schedule(
-                        user_id=user_id,
-                        title="Concurrent Standup",
-                        starts_at_utc=now + timedelta(minutes=15),
-                        meeting_mode="online",
-                        meeting_url="https://meet.example.com/conc",
-                        related_person="Me",
-                    )
-                )
-                seed_db.commit()
-
-            # Worker A runs full run_reminder_cycle(): enqueues BOTH due emails (daily + near),
-            # commits enqueue, then pauses inside SMTP while sending the first email.
-            # Worker B runs full run_reminder_cycle() concurrently while Worker A is still in SMTP:
-            # - Worker B must NOT block at enqueue on Worker A's transactionid.
-            # - Worker B must immediately claim and send the second independent email.
-            worker1_in_smtp = threading.Event()
-            release_worker1 = threading.Event()
-            lock = threading.Lock()
-            w1_sent: list[str] = []
-            w2_sent: list[str] = []
-            worker_errors: list[Exception] = []
-
-            def slow_send(
-                *, to_email: str, subject: str, body: str, html_body: str | None = None
-            ) -> None:
-                worker1_in_smtp.set()
-                release_worker1.wait(timeout=5)
-                with lock:
-                    w1_sent.append(subject)
-
-            def fast_send(
-                *, to_email: str, subject: str, body: str, html_body: str | None = None
-            ) -> None:
-                with lock:
-                    w2_sent.append(subject)
-
-            def run_worker1() -> None:
-                try:
-                    with Session(schema_engine) as w1_db:
-                        run_reminder_cycle(
-                            w1_db,
-                            now_utc=now,
-                            retry_delay=timedelta(0),
-                            send_fn=slow_send,
-                        )
-                except Exception as exc:
-                    with lock:
-                        worker_errors.append(exc)
-
-            worker2_done = threading.Event()
-            w2_processed_count: list[int] = []
-
-            def run_worker2() -> None:
-                try:
-                    with Session(schema_engine) as w2_db:
-                        processed = run_reminder_cycle(
-                            w2_db,
-                            now_utc=now,
-                            retry_delay=timedelta(0),
-                            send_fn=fast_send,
-                        )
-                        with lock:
-                            w2_processed_count.append(len(processed))
-                except Exception as exc:
-                    with lock:
-                        worker_errors.append(exc)
-                finally:
-                    worker2_done.set()
-
-            p1 = threading.Thread(target=run_worker1)
-            p1.start()
-            self.assertTrue(worker1_in_smtp.wait(timeout=5))
-
-            try:
-                p2 = threading.Thread(target=run_worker2)
-                p2.start()
-                # Worker B must finish its entire cycle (enqueue + sending email #2)
-                # BEFORE Worker A is released from SMTP!
-                self.assertTrue(
-                    worker2_done.wait(timeout=5),
-                    "Worker B was blocked while Worker A was sending SMTP",
-                )
-                p2.join(timeout=5)
-                self.assertEqual(w2_processed_count, [1])
-                self.assertEqual(len(w2_sent), 1)
-            finally:
-                release_worker1.set()
-                p1.join(timeout=10)
-
-            self.assertEqual(worker_errors, [])
-            self.assertEqual(len(w1_sent), 1)
-            self.assertEqual(len(w2_sent), 1)
-            self.assertEqual(len(set(w1_sent + w2_sent)), 2)
-
-            with Session(schema_engine) as check_db:
-                deliveries = check_db.scalars(select(EmailDelivery)).all()
-                self.assertEqual(len(deliveries), 2)
-                self.assertTrue(all(item.status == "sent" for item in deliveries))
-
-            # Also verify two simultaneous enqueue calls on a brand-new schedule
-            # never raise IntegrityError.
-            with Session(schema_engine) as seed_db:
-                seed_db.add(
-                    Schedule(
-                        user_id=user_id,
-                        title="Simultaneous Enqueue Check",
-                        starts_at_utc=now + timedelta(minutes=20),
-                        meeting_mode="offline",
-                        location="Room B",
-                        related_person="Me",
-                    )
-                )
-                seed_db.commit()
-
-            barrier = threading.Barrier(2)
-            enqueue_counts: list[int] = []
-            enqueue_errors: list[Exception] = []
-
-            def concurrent_enqueue() -> None:
-                try:
-                    with Session(schema_engine) as worker_db:
-                        barrier.wait(timeout=5)
-                        created = enqueue_due_reminders(worker_db, now_utc=now)
-                        worker_db.commit()
-                        with lock:
-                            enqueue_counts.append(len(created))
-                except Exception as exc:
-                    with lock:
-                        enqueue_errors.append(exc)
-
-            t1 = threading.Thread(target=concurrent_enqueue)
-            t2 = threading.Thread(target=concurrent_enqueue)
-            t1.start()
-            t2.start()
-            t1.join(timeout=10)
-            t2.join(timeout=10)
-
-            self.assertEqual(enqueue_errors, [])
-            self.assertEqual(sum(enqueue_counts), 1)
-        finally:
-            schema_engine.dispose()
-            with engine.begin() as conn:
-                conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-
