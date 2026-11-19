@@ -26,6 +26,9 @@ Run the PostgreSQL-backed flow tests with `DATABASE_URL` set (and `PGPASSFILE` i
 ./.venv/bin/python -m unittest tests.test_schedules -v
 ./.venv/bin/python -m unittest tests.test_chat_proposals -v
 ./.venv/bin/python -m unittest tests.test_reminders -v
+./.venv/bin/python -m unittest tests.test_reminder_schedule_changes -v
+./.venv/bin/python -m unittest tests.test_reminder_concurrency -v
+./.venv/bin/python -m unittest tests.test_mailer -v
 ./.venv/bin/python -m unittest tests.test_password_reset -v
 ./.venv/bin/python -m unittest tests.test_chat_history -v
 ./.venv/bin/python -m unittest tests.test_chat_completions -v
