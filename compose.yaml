@@ -49,5 +49,24 @@ services:
       retries: 6
       start_period: 30s
 
+  worker:
+    build: .
+    profiles: ["worker"]
+    command: ["python", "-m", "scripts.reminder_worker", "--interval", "${REMINDER_INTERVAL_SECONDS:-30}"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://secretary_schedule_app@db:5432/secretary_schedule_dev
+      PGPASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      APP_FRONTEND_URL: ${APP_FRONTEND_URL:-http://localhost:5173}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_TIMEOUT_SECONDS: ${SMTP_TIMEOUT_SECONDS:-30}
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres_data:
