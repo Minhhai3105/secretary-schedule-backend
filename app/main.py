@@ -14,6 +14,7 @@ from app.api.reminder_settings import router as reminder_settings_router
 from app.api.email_deliveries import router as email_deliveries_router
 from app.api.password_reset import router as password_reset_router
 from app.api.chat import router as chat_router
+from app.api.chat_completions import router as chat_completions_router
 
 app = FastAPI(title="Secretary Schedule API")
 app.add_middleware(
@@ -39,6 +40,7 @@ app.include_router(reminder_settings_router)
 app.include_router(email_deliveries_router)
 app.include_router(password_reset_router)
 app.include_router(chat_router)
+app.include_router(chat_completions_router)
 
 @app.get("/health")
 def health() -> dict[str, str]:

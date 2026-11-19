@@ -25,7 +25,7 @@ from app.schemas.chat import (
     ChatProposalResponse,
 )
 from app.schemas.schedule import ScheduleCreate, ScheduleResponse, ScheduleUpdate
-from app.services.chat_ai import ask_schedule_ai
+from app.services.chat_ai import ask_schedule_ai, stream_schedule_ai
 
 router = APIRouter(prefix="/api/chat", tags=["Chat"])
 VIETNAM_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
@@ -143,6 +143,12 @@ def chat_message(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ChatMessageResponse:
+    now, by_id, history, context = _chat_context(user, db)
+    raw = ask_schedule_ai(payload.message, history, context, now.astimezone(VIETNAM_TZ).isoformat())
+    return _complete_exchange(payload, user, db, now, by_id, raw)
+
+
+def _chat_context(user: User, db: Session):
     now = datetime.now(timezone.utc)
     schedules = db.scalars(
         select(Schedule)
@@ -171,12 +177,30 @@ def chat_message(
         .order_by(ChatMessage.created_at_utc.desc(), ChatMessage.id.desc())
         .limit(5)
     ).all()
-    raw = ask_schedule_ai(
-        payload.message,
-        [{"role": turn.role, "content": turn.content} for turn in reversed(recent)],
-        context,
-        now.astimezone(VIETNAM_TZ).isoformat(),
+    return now, by_id, [
+        {"role": turn.role, "content": turn.content} for turn in reversed(recent)
+    ], context
+
+
+def stream_chat_message(payload: ChatMessageRequest, user: User, db: Session):
+    now, by_id, history, context = _chat_context(user, db)
+    with_stream = stream_schedule_ai(
+        payload.message, history, context, now.astimezone(VIETNAM_TZ).isoformat(),
     )
+    try:
+        for kind, value in with_stream:
+            if kind == "result":
+                yield "result", _complete_exchange(payload, user, db, now, by_id, value)
+            else:
+                yield kind, value
+    finally:
+        with_stream.close()
+
+
+def _complete_exchange(
+    payload: ChatMessageRequest, user: User, db: Session, now: datetime,
+    by_id: dict[UUID, Schedule], raw: dict,
+) -> ChatMessageResponse:
     try:
         result = AIResult.model_validate(raw)
     except ValidationError as exc:
