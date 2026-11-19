@@ -21,6 +21,7 @@ from app.services.reminders import (
     MAX_ATTEMPTS,
     enqueue_due_reminders,
     process_due_deliveries,
+    run_reminder_cycle,
 )
 from tests._db_case import DatabaseCase
 
@@ -356,4 +357,38 @@ class ReminderWorkerTests(DatabaseCase):
                 "bot@example.com", "secret-password"
             )
             smtp_instance.send_message.assert_called_once()
+
+    def test_unconfigured_smtp_keeps_due_deliveries_pending_without_consuming_retries(
+        self,
+    ) -> None:
+        now = self._relative_morning_utc()
+        self.settings.near_enabled = False
+        self.db.flush()
+
+        unconfigured_env = {
+            "SMTP_HOST": "",
+            "SMTP_USERNAME": "",
+            "SMTP_PASSWORD": "",
+            "SMTP_FROM": "",
+        }
+        with patch.dict("os.environ", unconfigured_env, clear=False):
+            self.assertFalse(smtp_configured())
+            enqueue_due_reminders(self.db, now_utc=now)
+            for step in range(MAX_ATTEMPTS + 1):
+                processed = process_due_deliveries(
+                    self.db,
+                    now_utc=now + timedelta(minutes=step * 5),
+                    retry_delay=timedelta(0),
+                )
+                self.assertEqual(processed, [])
+
+        delivery = self.db.scalar(
+            select(EmailDelivery).where(EmailDelivery.user_id == self.user.id)
+        )
+        self.assertIsNotNone(delivery)
+        self.assertEqual(delivery.status, "pending")
+        attempts = self.db.scalars(
+            select(EmailAttempt).where(EmailAttempt.delivery_id == delivery.id)
+        ).all()
+        self.assertEqual(attempts, [])
 

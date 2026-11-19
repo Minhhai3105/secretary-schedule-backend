@@ -125,8 +125,10 @@ curl --fail http://127.0.0.1:${FRONTEND_PORT:-5173}/healthz
 
 Open <http://localhost:5173> (or `FRONTEND_PORT` if customized). If you change
 `API_PORT`, rebuild `web` (`--build`) so `VITE_API_BASE_URL` matches the host
-API port, and keep `CORS_ORIGINS` / `APP_FRONTEND_URL` aligned with
-`FRONTEND_PORT`.
+API port. `CORS_ORIGINS` and `APP_FRONTEND_URL` automatically follow
+`FRONTEND_PORT` unless overridden in your env file. When `SMTP_HOST` is empty,
+the `worker` service stays idle after enqueueing reminders without consuming
+delivery retry attempts until SMTP credentials are configured.
 
 ## GitHub Actions CI
 

@@ -10,7 +10,7 @@ from app.models.email_delivery import EmailDelivery
 from app.models.reminder_setting import ReminderSetting
 from app.models.schedule import Schedule
 from app.models.user import User
-from app.services.mailer import send_email_message
+from app.services.mailer import send_email_message, smtp_configured
 
 VIETNAM_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 MAX_ATTEMPTS = 4
@@ -271,6 +271,9 @@ def process_due_deliveries(
     retry_delay: timedelta = DEFAULT_RETRY_DELAY,
     send_fn: SendEmailFn = send_email_message,
 ) -> list[EmailDelivery]:
+    if send_fn is send_email_message and not smtp_configured():
+        return []
+
     now = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
     candidates = db.scalars(
         select(EmailDelivery)

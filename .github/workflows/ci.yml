@@ -66,14 +66,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate Compose configuration
+      - name: Validate Compose configuration and CORS port interpolation
         env:
           DB_ADMIN_PASSWORD: ci-admin-password-placeholder
           DB_PASSWORD: ci-app-password-placeholder
           JWT_SECRET: ci-only-secret-key-at-least-32-characters-long
+          FRONTEND_PORT: "15173"
         run: |
           docker compose config --quiet
-          docker compose --profile worker config --quiet
+          docker compose --profile worker config | grep -q "http://localhost:15173,http://127.0.0.1:15173"
 
       - name: Build backend container image
         run: docker build -t secretary-schedule-backend:ci .
