@@ -3,6 +3,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models.email_attempt import EmailAttempt
@@ -45,10 +46,12 @@ def _update_event_key(schedule: Schedule) -> str:
 
 def cancel_stale_schedule_deliveries(db: Session) -> int:
     active_deliveries = db.scalars(
-        select(EmailDelivery).where(
+        select(EmailDelivery)
+        .where(
             EmailDelivery.kind.in_(("near", "update")),
             EmailDelivery.status.in_(("pending", "failed")),
         )
+        .with_for_update(skip_locked=True)
     ).all()
     cancelled_count = 0
     for delivery in active_deliveries:
@@ -74,6 +77,33 @@ def cancel_stale_schedule_deliveries(db: Session) -> int:
     if cancelled_count:
         db.flush()
     return cancelled_count
+
+
+def _enqueue_delivery(
+    db: Session,
+    *,
+    user_id: object,
+    schedule_id: object | None,
+    event_key: str,
+    kind: str,
+    applicable_date_vietnam: date | None,
+    due_at_utc: datetime,
+) -> EmailDelivery | None:
+    stmt = (
+        pg_insert(EmailDelivery)
+        .values(
+            user_id=user_id,
+            schedule_id=schedule_id,
+            event_key=event_key,
+            kind=kind,
+            applicable_date_vietnam=applicable_date_vietnam,
+            due_at_utc=due_at_utc,
+            status="pending",
+        )
+        .on_conflict_do_nothing(index_elements=["event_key"])
+        .returning(EmailDelivery)
+    )
+    return db.scalar(stmt)
 
 
 def enqueue_due_reminders(
@@ -103,20 +133,16 @@ def enqueue_due_reminders(
             due_utc = due_vn.astimezone(timezone.utc)
             if due_utc <= now:
                 event_key = _daily_event_key(setting.user_id, vn_today)
-                existing = db.scalar(
-                    select(EmailDelivery).where(EmailDelivery.event_key == event_key)
+                delivery = _enqueue_delivery(
+                    db,
+                    user_id=setting.user_id,
+                    schedule_id=None,
+                    event_key=event_key,
+                    kind="daily",
+                    applicable_date_vietnam=vn_today,
+                    due_at_utc=due_utc,
                 )
-                if existing is None:
-                    delivery = EmailDelivery(
-                        user_id=setting.user_id,
-                        schedule_id=None,
-                        event_key=event_key,
-                        kind="daily",
-                        applicable_date_vietnam=vn_today,
-                        due_at_utc=due_utc,
-                        status="pending",
-                    )
-                    db.add(delivery)
+                if delivery is not None:
                     created.append(delivery)
 
         if setting.near_enabled:
@@ -131,24 +157,20 @@ def enqueue_due_reminders(
             ).all()
             for schedule in upcoming_schedules:
                 event_key = _near_event_key(schedule)
-                existing = db.scalar(
-                    select(EmailDelivery).where(EmailDelivery.event_key == event_key)
+                due_utc = schedule.starts_at_utc - timedelta(
+                    minutes=setting.lead_minutes
                 )
-                if existing is None:
-                    due_utc = schedule.starts_at_utc - timedelta(
-                        minutes=setting.lead_minutes
-                    )
-                    vn_date = schedule.starts_at_utc.astimezone(VIETNAM_TZ).date()
-                    delivery = EmailDelivery(
-                        user_id=setting.user_id,
-                        schedule_id=schedule.id,
-                        event_key=event_key,
-                        kind="near",
-                        applicable_date_vietnam=vn_date,
-                        due_at_utc=due_utc,
-                        status="pending",
-                    )
-                    db.add(delivery)
+                vn_date = schedule.starts_at_utc.astimezone(VIETNAM_TZ).date()
+                delivery = _enqueue_delivery(
+                    db,
+                    user_id=setting.user_id,
+                    schedule_id=schedule.id,
+                    event_key=event_key,
+                    kind="near",
+                    applicable_date_vietnam=vn_date,
+                    due_at_utc=due_utc,
+                )
+                if delivery is not None:
                     created.append(delivery)
 
         changed_schedules = db.scalars(
@@ -163,21 +185,17 @@ def enqueue_due_reminders(
         ).all()
         for schedule in changed_schedules:
             event_key = _update_event_key(schedule)
-            existing = db.scalar(
-                select(EmailDelivery).where(EmailDelivery.event_key == event_key)
+            vn_date = schedule.starts_at_utc.astimezone(VIETNAM_TZ).date()
+            delivery = _enqueue_delivery(
+                db,
+                user_id=setting.user_id,
+                schedule_id=schedule.id,
+                event_key=event_key,
+                kind="update",
+                applicable_date_vietnam=vn_date,
+                due_at_utc=now,
             )
-            if existing is None:
-                vn_date = schedule.starts_at_utc.astimezone(VIETNAM_TZ).date()
-                delivery = EmailDelivery(
-                    user_id=setting.user_id,
-                    schedule_id=schedule.id,
-                    event_key=event_key,
-                    kind="update",
-                    applicable_date_vietnam=vn_date,
-                    due_at_utc=now,
-                    status="pending",
-                )
-                db.add(delivery)
+            if delivery is not None:
                 created.append(delivery)
 
     if created:
@@ -382,15 +400,12 @@ def process_due_deliveries(
 
         try:
             subject, body, html_body = _compose_delivery_email(db, delivery)
-            try:
-                send_fn(
-                    to_email=user.email,
-                    subject=subject,
-                    body=body,
-                    html_body=html_body,
-                )
-            except TypeError:
-                send_fn(to_email=user.email, subject=subject, body=body)
+            send_fn(
+                to_email=user.email,
+                subject=subject,
+                body=body,
+                html_body=html_body,
+            )
             finished_at = (
                 now
                 if now_utc is not None
