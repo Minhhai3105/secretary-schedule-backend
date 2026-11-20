@@ -290,6 +290,11 @@ def process_due_deliveries(
 
     processed: list[EmailDelivery] = []
     for delivery in candidates:
+        current_now = (
+            now
+            if now_utc is not None
+            else max(now, datetime.now(timezone.utc))
+        )
         attempts = db.scalars(
             select(EmailAttempt)
             .where(EmailAttempt.delivery_id == delivery.id)
@@ -300,7 +305,7 @@ def process_due_deliveries(
 
         if delivery.status == "failed" and attempts:
             last_time = attempts[-1].finished_at_utc or attempts[-1].started_at_utc
-            if now < last_time + retry_delay:
+            if current_now < last_time + retry_delay:
                 continue
 
         if delivery.kind in ("near", "update"):
@@ -313,7 +318,7 @@ def process_due_deliveries(
                 is_stale = (
                     schedule is None
                     or schedule.cancelled_at_utc is not None
-                    or schedule.starts_at_utc <= now
+                    or schedule.starts_at_utc <= current_now
                     or delivery.event_key != _near_event_key(schedule)
                 )
             else:
@@ -338,7 +343,7 @@ def process_due_deliveries(
             delivery_id=delivery.id,
             attempt_number=attempt_number,
             status="sending",
-            started_at_utc=now,
+            started_at_utc=current_now,
         )
         delivery.status = "sending"
         db.add(attempt)
@@ -348,9 +353,9 @@ def process_due_deliveries(
             subject, body = _compose_delivery_email(db, delivery)
             send_fn(to_email=user.email, subject=subject, body=body)
             finished_at = (
-                now
+                current_now
                 if now_utc is not None
-                else max(now, datetime.now(timezone.utc))
+                else max(current_now, datetime.now(timezone.utc))
             )
             attempt.status = "success"
             attempt.finished_at_utc = finished_at
@@ -359,9 +364,9 @@ def process_due_deliveries(
             delivery.sent_at_utc = finished_at
         except Exception as exc:
             finished_at = (
-                now
+                current_now
                 if now_utc is not None
-                else max(now, datetime.now(timezone.utc))
+                else max(current_now, datetime.now(timezone.utc))
             )
             attempt.status = "failed"
             attempt.finished_at_utc = finished_at

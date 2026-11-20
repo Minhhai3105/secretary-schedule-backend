@@ -516,3 +516,65 @@ class ReminderWorkerTests(DatabaseCase):
         self.assertEqual(len(processed), 1)
         self.assertEqual(processed[0].status, "cancelled")
 
+    def test_slow_first_email_cancels_second_near_reminder_that_started_mid_batch(
+        self,
+    ) -> None:
+        t0 = self._relative_morning_utc()
+        self.settings.daily_enabled = True
+        self.settings.near_enabled = True
+        self.db.flush()
+
+        # Schedule starts 20 seconds after t0; daily reminder is due at 07:00 VN (t0 - 1h)
+        # so daily sorts BEFORE the near reminder (due at t0 - 29m40s).
+        schedule = create_schedule(
+            ScheduleCreate(
+                title="Imminent Sync",
+                starts_at_utc=t0 + timedelta(seconds=20),
+                meeting_mode="online",
+                meeting_url="https://meet.example.com/imminent",
+            ),
+            self.user,
+            self.db,
+        )
+        created = enqueue_due_reminders(self.db, now_utc=t0)
+        self.assertEqual(len(created), 2)
+
+        current_clock = [t0]
+
+        class FakeDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return current_clock[0].astimezone(tz) if tz else current_clock[0]
+
+        sent: list[str] = []
+
+        def slow_send(*, to_email: str, subject: str, body: str) -> None:
+            sent.append(subject)
+            # First email takes 25s over SMTP -> second meeting started 5s ago
+            current_clock[0] = t0 + timedelta(seconds=25)
+
+        with patch("app.services.reminders.datetime", FakeDateTime):
+            processed = process_due_deliveries(
+                self.db,
+                now_utc=None,
+                retry_delay=timedelta(0),
+                send_fn=slow_send,
+            )
+
+        self.assertEqual(len(processed), 2)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Daily schedule summary", sent[0])
+
+        near_delivery = self.db.scalar(
+            select(EmailDelivery).where(
+                EmailDelivery.schedule_id == schedule.id,
+                EmailDelivery.kind == "near",
+            )
+        )
+        self.assertIsNotNone(near_delivery)
+        self.assertEqual(near_delivery.status, "cancelled")
+        near_attempts = self.db.scalars(
+            select(EmailAttempt).where(EmailAttempt.delivery_id == near_delivery.id)
+        ).all()
+        self.assertEqual(near_attempts, [])
+
