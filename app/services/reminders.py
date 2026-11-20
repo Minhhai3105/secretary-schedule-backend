@@ -38,7 +38,10 @@ def _update_event_key(schedule: Schedule) -> str:
     return f"update:{schedule.id}:v{schedule.version}"
 
 
-def cancel_stale_schedule_deliveries(db: Session) -> int:
+def cancel_stale_schedule_deliveries(
+    db: Session, *, now_utc: datetime | None = None
+) -> int:
+    now = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
     active_deliveries = db.scalars(
         select(EmailDelivery).where(
             EmailDelivery.kind.in_(("near", "update")),
@@ -56,6 +59,7 @@ def cancel_stale_schedule_deliveries(db: Session) -> int:
             is_stale = (
                 schedule is None
                 or schedule.cancelled_at_utc is not None
+                or schedule.starts_at_utc <= now
                 or delivery.event_key != _near_event_key(schedule)
             )
         else:
@@ -75,7 +79,7 @@ def enqueue_due_reminders(
     db: Session, *, now_utc: datetime | None = None
 ) -> list[EmailDelivery]:
     now = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    cancel_stale_schedule_deliveries(db)
+    cancel_stale_schedule_deliveries(db, now_utc=now)
 
     created: list[EmailDelivery] = []
     vn_now = now.astimezone(VIETNAM_TZ)
@@ -309,6 +313,7 @@ def process_due_deliveries(
                 is_stale = (
                     schedule is None
                     or schedule.cancelled_at_utc is not None
+                    or schedule.starts_at_utc <= now
                     or delivery.event_key != _near_event_key(schedule)
                 )
             else:
