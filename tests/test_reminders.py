@@ -21,6 +21,7 @@ from app.services.reminders import (
     MAX_ATTEMPTS,
     enqueue_due_reminders,
     process_due_deliveries,
+    run_reminder_cycle,
 )
 from tests._db_case import DatabaseCase
 
@@ -356,4 +357,224 @@ class ReminderWorkerTests(DatabaseCase):
                 "bot@example.com", "secret-password"
             )
             smtp_instance.send_message.assert_called_once()
+
+    def test_unconfigured_smtp_keeps_due_deliveries_pending_without_consuming_retries(
+        self,
+    ) -> None:
+        now = self._relative_morning_utc()
+        self.settings.near_enabled = False
+        self.db.flush()
+
+        unconfigured_env = {
+            "SMTP_HOST": "",
+            "SMTP_USERNAME": "",
+            "SMTP_PASSWORD": "",
+            "SMTP_FROM": "",
+        }
+        with patch.dict("os.environ", unconfigured_env, clear=False):
+            self.assertFalse(smtp_configured())
+            enqueue_due_reminders(self.db, now_utc=now)
+            for step in range(MAX_ATTEMPTS + 1):
+                processed = process_due_deliveries(
+                    self.db,
+                    now_utc=now + timedelta(minutes=step * 5),
+                    retry_delay=timedelta(0),
+                )
+                self.assertEqual(processed, [])
+
+        delivery = self.db.scalar(
+            select(EmailDelivery).where(EmailDelivery.user_id == self.user.id)
+        )
+        self.assertIsNotNone(delivery)
+        self.assertEqual(delivery.status, "pending")
+        attempts = self.db.scalars(
+            select(EmailAttempt).where(EmailAttempt.delivery_id == delivery.id)
+        ).all()
+        self.assertEqual(attempts, [])
+
+    def test_past_near_reminder_is_cancelled_when_smtp_recovers_later(self) -> None:
+        now = self._relative_morning_utc()
+        self.settings.daily_enabled = False
+        self.settings.near_enabled = True
+        self.db.flush()
+
+        past_schedule = create_schedule(
+            ScheduleCreate(
+                title="Yesterday Meeting",
+                starts_at_utc=now + timedelta(minutes=15),
+                meeting_mode="online",
+                meeting_url="https://meet.example.com/past",
+            ),
+            self.user,
+            self.db,
+        )
+
+        # 1) SMTP unconfigured: delivery stays pending with 0 attempts
+        unconfigured_env = {
+            "SMTP_HOST": "",
+            "SMTP_USERNAME": "",
+            "SMTP_PASSWORD": "",
+            "SMTP_FROM": "",
+        }
+        with patch.dict("os.environ", unconfigured_env, clear=False):
+            enqueue_due_reminders(self.db, now_utc=now)
+            self.assertEqual(
+                process_due_deliveries(self.db, now_utc=now, retry_delay=timedelta(0)),
+                [],
+            )
+
+        past_delivery = self.db.scalar(
+            select(EmailDelivery).where(
+                EmailDelivery.schedule_id == past_schedule.id,
+                EmailDelivery.kind == "near",
+            )
+        )
+        self.assertIsNotNone(past_delivery)
+        self.assertEqual(past_delivery.status, "pending")
+
+        # 2) 24 hours later, SMTP is configured and a new future schedule is due
+        later = now + timedelta(hours=24)
+        future_schedule = create_schedule(
+            ScheduleCreate(
+                title="Future Meeting",
+                starts_at_utc=later + timedelta(minutes=15),
+                meeting_mode="online",
+                meeting_url="https://meet.example.com/future",
+            ),
+            self.user,
+            self.db,
+        )
+
+        configured_env = {
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_PORT": "465",
+            "SMTP_USERNAME": "bot@example.com",
+            "SMTP_PASSWORD": "secret-password",
+            "SMTP_FROM": "bot@example.com",
+        }
+        with patch.dict("os.environ", configured_env, clear=False), patch(
+            "app.services.mailer.smtplib.SMTP_SSL"
+        ) as mock_ssl_cls:
+            smtp_instance = MagicMock()
+            mock_ssl_cls.return_value.__enter__.return_value = smtp_instance
+
+            enqueue_due_reminders(self.db, now_utc=later)
+            process_due_deliveries(self.db, now_utc=later, retry_delay=timedelta(0))
+
+            self.assertEqual(smtp_instance.send_message.call_count, 1)
+            sent_msg = smtp_instance.send_message.call_args.args[0]
+            self.assertIn("Future Meeting", sent_msg["Subject"])
+            self.assertNotIn("Yesterday Meeting", sent_msg["Subject"])
+
+        self.db.refresh(past_delivery)
+        self.assertEqual(past_delivery.status, "cancelled")
+        past_attempts = self.db.scalars(
+            select(EmailAttempt).where(EmailAttempt.delivery_id == past_delivery.id)
+        ).all()
+        self.assertEqual(past_attempts, [])
+
+        future_delivery = self.db.scalar(
+            select(EmailDelivery).where(
+                EmailDelivery.schedule_id == future_schedule.id,
+                EmailDelivery.kind == "near",
+            )
+        )
+        self.assertIsNotNone(future_delivery)
+        self.assertEqual(future_delivery.status, "sent")
+
+    def test_process_due_deliveries_cancels_past_near_without_calling_sender(self) -> None:
+        now = self._relative_morning_utc()
+        self.settings.daily_enabled = False
+        self.settings.near_enabled = True
+        self.db.flush()
+
+        schedule = create_schedule(
+            ScheduleCreate(
+                title="Already Started Meeting",
+                starts_at_utc=now + timedelta(minutes=10),
+                meeting_mode="offline",
+                location="Room 1",
+            ),
+            self.user,
+            self.db,
+        )
+        enqueue_due_reminders(self.db, now_utc=now)
+
+        sent: list[str] = []
+
+        def fake_send(*, to_email: str, subject: str, body: str) -> None:
+            sent.append(subject)
+
+        # Call process_due_deliveries directly right at starts_at_utc (<= now)
+        processed = process_due_deliveries(
+            self.db,
+            now_utc=schedule.starts_at_utc,
+            retry_delay=timedelta(0),
+            send_fn=fake_send,
+        )
+        self.assertEqual(sent, [])
+        self.assertEqual(len(processed), 1)
+        self.assertEqual(processed[0].status, "cancelled")
+
+    def test_slow_first_email_cancels_second_near_reminder_that_started_mid_batch(
+        self,
+    ) -> None:
+        t0 = self._relative_morning_utc()
+        self.settings.daily_enabled = True
+        self.settings.near_enabled = True
+        self.db.flush()
+
+        # Schedule starts 20 seconds after t0; daily reminder is due at 07:00 VN (t0 - 1h)
+        # so daily sorts BEFORE the near reminder (due at t0 - 29m40s).
+        schedule = create_schedule(
+            ScheduleCreate(
+                title="Imminent Sync",
+                starts_at_utc=t0 + timedelta(seconds=20),
+                meeting_mode="online",
+                meeting_url="https://meet.example.com/imminent",
+            ),
+            self.user,
+            self.db,
+        )
+        created = enqueue_due_reminders(self.db, now_utc=t0)
+        self.assertEqual(len(created), 2)
+
+        current_clock = [t0]
+
+        class FakeDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return current_clock[0].astimezone(tz) if tz else current_clock[0]
+
+        sent: list[str] = []
+
+        def slow_send(*, to_email: str, subject: str, body: str) -> None:
+            sent.append(subject)
+            # First email takes 25s over SMTP -> second meeting started 5s ago
+            current_clock[0] = t0 + timedelta(seconds=25)
+
+        with patch("app.services.reminders.datetime", FakeDateTime):
+            processed = process_due_deliveries(
+                self.db,
+                now_utc=None,
+                retry_delay=timedelta(0),
+                send_fn=slow_send,
+            )
+
+        self.assertEqual(len(processed), 2)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Daily schedule summary", sent[0])
+
+        near_delivery = self.db.scalar(
+            select(EmailDelivery).where(
+                EmailDelivery.schedule_id == schedule.id,
+                EmailDelivery.kind == "near",
+            )
+        )
+        self.assertIsNotNone(near_delivery)
+        self.assertEqual(near_delivery.status, "cancelled")
+        near_attempts = self.db.scalars(
+            select(EmailAttempt).where(EmailAttempt.delivery_id == near_delivery.id)
+        ).all()
+        self.assertEqual(near_attempts, [])
 

@@ -100,8 +100,46 @@ For config changes use `docker compose up -d --force-recreate api`, because
 One optional reminder worker can run from the same image after migrations:
 
 ```sh
+docker compose --profile worker up -d --wait
+```
+
+Or as a one-off container:
+
+```sh
 docker compose run --rm --no-deps api python -m scripts.reminder_worker --interval 30
 ```
+
+## Full-stack Docker Compose (FE + BE + PostgreSQL + Worker)
+
+When the companion `secretary-schedule-frontend` repository is checked out next
+to this repo (`../secretary-schedule-frontend`, or set `FRONTEND_CONTEXT` in
+your Compose env file), launch all four services (`db`, `api`, `worker`, `web`)
+together:
+
+```sh
+docker compose -f compose.yaml -f compose.fullstack.yaml --env-file .env.docker config --quiet
+docker compose -f compose.yaml -f compose.fullstack.yaml --env-file .env.docker up --build -d --wait
+curl --fail http://127.0.0.1:${API_PORT:-8000}/health
+curl --fail http://127.0.0.1:${FRONTEND_PORT:-5173}/healthz
+```
+
+Open <http://localhost:5173> (or `FRONTEND_PORT` if customized). If you change
+`API_PORT`, rebuild `web` (`--build`) so `VITE_API_BASE_URL` matches the host
+API port. `CORS_ORIGINS` and `APP_FRONTEND_URL` automatically follow
+`FRONTEND_PORT` unless overridden in your env file. When `SMTP_HOST` is empty,
+the `worker` service stays idle after enqueueing reminders without consuming
+delivery retry attempts until SMTP credentials are configured.
+
+## GitHub Actions CI
+
+`.github/workflows/ci.yml` automatically runs on every push and pull request
+targeting `main`:
+
+- `test`: starts PostgreSQL 18, installs `requirements.txt`, verifies
+  `pip check`, applies and checks Alembic migrations (`alembic upgrade head`
+  and `alembic check`), and runs the full `unittest` suite.
+- `docker`: validates `compose.yaml` (default and `worker` profiles) and builds
+  the backend image.
 
 The worker is not started automatically by this two-service setup; run only
 one worker. This configuration has no HTTPS, backups, or deployment rollout

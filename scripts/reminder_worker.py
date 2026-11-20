@@ -7,6 +7,7 @@ import time
 from sqlalchemy.orm import Session
 
 from app.db.session import engine
+from app.services.mailer import smtp_configured
 from app.services.reminders import run_reminder_cycle
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,12 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    if not smtp_configured():
+        logger.warning(
+            "SMTP is not configured; due reminders will stay pending without "
+            "consuming retry attempts until SMTP settings are provided."
+        )
 
     if args.once:
         count = run_once()
